@@ -95,23 +95,28 @@ var (
 	ErrMalformed = errors.New("malformed packet")
 	ErrChain     = errors.New("invalid chain")
 	ErrHop       = errors.New("hop out of range")
-	ErrKeyPerms  = errors.New("key file must be mode 0600")
+	ErrKeyPerms  = errors.New("key file must not be world-accessible")
 	ErrKeyLen    = errors.New("key must be 32 bytes hex-encoded")
 )
 
 // LoadKey reads a hex-encoded pre-shared key from disk.
 //
 // The key is never accepted from argv or the environment, so it cannot leak
-// through `ps` or shell history. The file must not be group- or
-// world-accessible.
+// through `ps` or shell history.
+//
+// The permission check refuses a world-accessible file, which is exactly what a
+// bare `openssl rand -hex 32 > key` leaves behind under a default umask. Group
+// bits are allowed: group access is an explicit administrative grant, and
+// systemd's LoadCredential= hands the agent a 0440 root:root file inside a 0550
+// root:root directory -- tighter than 0600 in practice, since only root and the
+// service's own user can reach it at all.
 func LoadKey(path string) ([]byte, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("key file: %w", err)
 	}
-	if fi.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("%w (have %#o): chmod 600 %s",
-			ErrKeyPerms, fi.Mode().Perm(), path)
+	if perm := fi.Mode().Perm(); perm&0o007 != 0 {
+		return nil, fmt.Errorf("%w (have %#o): chmod 600 %s", ErrKeyPerms, perm, path)
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -211,10 +212,11 @@ func TestLoadKey(t *testing.T) {
 		}
 	})
 
-	// A key readable by other users on a shared box is not a secret.
-	t.Run("permissive perms refused", func(t *testing.T) {
-		for _, mode := range []os.FileMode{0o644, 0o640, 0o604, 0o666} {
-			p := filepath.Join(dir, "perm.key")
+	// A key any user on the box can read is not a secret. This is what a bare
+	// `openssl rand -hex 32 > key` leaves under a default umask.
+	t.Run("world-accessible refused", func(t *testing.T) {
+		for _, mode := range []os.FileMode{0o644, 0o604, 0o666, 0o777, 0o606} {
+			p := filepath.Join(dir, fmt.Sprintf("perm-%o.key", mode))
 			if err := os.WriteFile(p, []byte(valid), mode); err != nil {
 				t.Fatal(err)
 			}
@@ -223,6 +225,27 @@ func TestLoadKey(t *testing.T) {
 			}
 			if _, err := LoadKey(p); !errors.Is(err, ErrKeyPerms) {
 				t.Errorf("mode %#o: got %v want ErrKeyPerms", mode, err)
+			}
+		}
+	})
+
+	// Modes with no world bits must be accepted. 0440 is what systemd's
+	// LoadCredential= actually hands the agent (verified on Debian 13 /
+	// systemd 257: 0440 root:root inside a 0550 root:root directory), so
+	// refusing it would crash-loop the service on every relay.
+	t.Run("non-world-accessible accepted", func(t *testing.T) {
+		for _, mode := range []os.FileMode{0o600, 0o400, 0o440, 0o640} {
+			// A fresh path per mode: WriteFile does not re-apply perms to an
+			// existing file, so reusing one would hit the read-only leftover.
+			p := filepath.Join(dir, fmt.Sprintf("ok-%o.key", mode))
+			if err := os.WriteFile(p, []byte(valid), mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(p, mode); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadKey(p); err != nil {
+				t.Errorf("mode %#o refused: %v", mode, err)
 			}
 		}
 	})
