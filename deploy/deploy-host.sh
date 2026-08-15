@@ -47,7 +47,11 @@ if [ "$(ssh "${SSH_OPTS[@]}" "$TARGET" 'id -u')" != "0" ]; then SUDO="sudo -n"; 
 
 ssh "${SSH_OPTS[@]}" "$TARGET" "set -e
   $SUDO install -m755 -o root -g root /tmp/boomerang.new /usr/local/bin/boomerang
-  $SUDO install -m600 -o root -g root /tmp/boomerang.key.new /etc/boomerang.key
+  # 0640 root:<login group> is one key serving both readers: systemd reads it as
+  # root for LoadCredential=, and the logged-in user can run the CLI unflagged.
+  # Root could read any copy anyway, so a second file under \$HOME would widen
+  # exposure without adding access.
+  $SUDO install -m640 -o root -g \"\$(id -gn)\" /tmp/boomerang.key.new /etc/boomerang.key
   $SUDO install -m644 -o root -g root /tmp/boomerang-agent.service.new \
        /etc/systemd/system/boomerang-agent.service
   rm -f /tmp/boomerang.new /tmp/boomerang.key.new /tmp/boomerang-agent.service.new

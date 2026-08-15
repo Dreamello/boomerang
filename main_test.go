@@ -4,6 +4,9 @@ package main
 
 import (
 	"net"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -73,3 +76,29 @@ func TestResolveHopRejectsGarbage(t *testing.T) {
 // A source given a hostname on the wire is a bug in the caller, not something to
 
 // paper over by resolving late.
+
+// The default key path has to be usable by whoever is running. On a relay the
+// system key is 0600 root:root (the agent reads it via LoadCredential), so a
+// normal login needs its own copy to be picked up without a flag.
+func TestDefaultKeyFilePrefersAUserOwnedCopy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// No user copy: fall back to a path root can use.
+	first := defaultKeyFile()
+	if runtime.GOOS == "linux" && first != "/etc/boomerang.key" {
+		t.Errorf("with no user key, linux should fall back to the system path, got %q", first)
+	}
+
+	// Once a user copy exists it wins, so `boomerang <chain>` works unflagged.
+	userKey := filepath.Join(home, ".config", "boomerang", "key")
+	if err := os.MkdirAll(filepath.Dir(userKey), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userKey, []byte(strings.Repeat("ab", KeyLen)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := defaultKeyFile(); got != userKey {
+		t.Errorf("user-owned key should win: got %q want %q", got, userKey)
+	}
+}

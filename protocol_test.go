@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -333,4 +334,74 @@ func TestIsLast(t *testing.T) {
 	if !direct.IsLast() {
 		t.Error("single-hop chain: destination not reported as last")
 	}
+}
+
+// The advice printed when a key cannot be loaded has to depend on WHY. Telling a
+// user to generate a key over a file they merely cannot read would overwrite a
+// working fleet key and break every agent sharing it.
+
+func TestLoadKeyErrorsAreDistinguishable(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("missing is ErrNotExist", func(t *testing.T) {
+		_, err := LoadKey(filepath.Join(dir, "absent.key"))
+		if err == nil {
+			t.Fatal("accepted a missing file")
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("callers cannot detect absence: %v", err)
+		}
+		if errors.Is(err, fs.ErrPermission) {
+			t.Errorf("a missing file must not look like a permission problem: %v", err)
+		}
+	})
+
+	t.Run("unreadable is ErrPermission", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses file permissions")
+		}
+		p := filepath.Join(dir, "unreadable.key")
+		if err := os.WriteFile(p, []byte(strings.Repeat("ab", KeyLen)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// Mode 0000: present, correct owner, simply not readable -- the shape of
+		// a root-owned 0600 fleet key seen by a normal user.
+		if err := os.Chmod(p, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		_, err := LoadKey(p)
+		if err == nil {
+			t.Fatal("read a file with no read permission")
+		}
+		if !errors.Is(err, fs.ErrPermission) {
+			t.Errorf("callers cannot detect unreadability: %v", err)
+		}
+		if errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("an unreadable file must not look absent -- that is what leads to "+
+				"advising a key overwrite: %v", err)
+		}
+		// The permission check must not misreport this as a mode problem: the
+		// mode is fine, the caller is simply not root.
+		if errors.Is(err, ErrKeyPerms) {
+			t.Errorf("reported as a bad mode rather than a permission denial: %v", err)
+		}
+	})
+
+	t.Run("world-readable is ErrKeyPerms, not a permission denial", func(t *testing.T) {
+		p := filepath.Join(dir, "wide.key")
+		if err := os.WriteFile(p, []byte(strings.Repeat("ab", KeyLen)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := LoadKey(p)
+		if !errors.Is(err, ErrKeyPerms) {
+			t.Errorf("got %v want ErrKeyPerms", err)
+		}
+		if errors.Is(err, fs.ErrPermission) || errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("a too-open key must not be confused with a missing or "+
+				"unreadable one: %v", err)
+		}
+	})
 }

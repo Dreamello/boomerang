@@ -11,9 +11,11 @@ package main
 // history.
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"os/signal"
@@ -28,15 +30,26 @@ import (
 // sockets, and unassigned for UDP.
 const DefaultPort = 8888
 
+// defaultKeyFile picks the key a run should use when none was named.
+//
+// A user-owned copy under $HOME wins when it exists, so a human on a relay box
+// gets a working default: the system key is 0600 root:root because the agent
+// reads it through systemd's LoadCredential, and a normal login cannot open it.
+// Falling back to the system path keeps root and the unit working unchanged.
 func defaultKeyFile() string {
+	if home, err := os.UserHomeDir(); err == nil {
+		user := filepath.Join(home, ".config", "boomerang", "key")
+		if _, err := os.Stat(user); err == nil {
+			return user
+		}
+		if runtime.GOOS != "linux" {
+			return user
+		}
+	}
 	if runtime.GOOS == "linux" {
 		return "/etc/boomerang.key"
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "boomerang.key"
-	}
-	return filepath.Join(home, ".config", "boomerang", "key")
+	return "boomerang.key"
 }
 
 func main() {
@@ -59,8 +72,22 @@ func main() {
 	key, err := LoadKey(*keyFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "boomerang: %v\n", err)
-		fmt.Fprintf(os.Stderr, "generate one with: openssl rand -hex 32 > %s && chmod 600 %s\n",
-			*keyFile, *keyFile)
+		// Tailor the hint: telling someone to generate a key over a file they
+		// merely cannot READ would overwrite a working fleet key and break every
+		// agent sharing it.
+		switch {
+		case errors.Is(err, fs.ErrPermission):
+			fmt.Fprintf(os.Stderr,
+				"the key exists but this user cannot read it. Either run with sudo, or\n"+
+					"copy it somewhere you own:\n"+
+					"  sudo install -m600 -o $USER %s ~/.config/boomerang/key\n"+
+					"  boomerang --key-file ~/.config/boomerang/key ...\n", *keyFile)
+		case errors.Is(err, fs.ErrNotExist):
+			fmt.Fprintf(os.Stderr,
+				"no key there yet. Copy the one the rest of the chain uses, or for a new\n"+
+					"fleet generate one and install it on every node:\n"+
+					"  openssl rand -hex 32 > %s && chmod 600 %s\n", *keyFile, *keyFile)
+		}
 		os.Exit(2)
 	}
 

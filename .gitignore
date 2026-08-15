@@ -5,3 +5,6 @@ boomerang
 
 # Never commit the pre-shared key
 *.key
+
+# macOS
+.DS_Store
