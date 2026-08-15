@@ -13,6 +13,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -50,6 +51,7 @@ func main() {
 		dropRate  = flag.Float64("debug-drop", 0, "agent: drop this fraction of packets (testing)")
 		verbose   = flag.Bool("v", false, "log dropped/unauthenticated packets")
 		perHold   = flag.Bool("holds", false, "show hold time per node instead of one total")
+		asJSON    = flag.Bool("json", false, "print one JSON object at exit instead of the text summary")
 	)
 	flag.Usage = usage
 	flag.Parse()
@@ -72,7 +74,7 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
-	runSource(targets, *port, key, *interval, *count, *wait, *perHold)
+	runSource(targets, *port, key, *interval, *count, *wait, *perHold, *asJSON)
 }
 
 func usage() {
@@ -112,7 +114,7 @@ func runAgent(bind string, port int, key []byte, dropRate float64, verbose bool)
 	}
 }
 
-func runSource(targets []string, port int, key []byte, interval time.Duration, count int, wait time.Duration, perHold bool) {
+func runSource(targets []string, port int, key []byte, interval time.Duration, count int, wait time.Duration, perHold, asJSON bool) {
 	// Resolve every hop once, here, and put addresses on the wire: DNS stays
 	// outside the measured intervals, and the chain is pinned to the hosts
 	// resolved at startup even under GeoDNS or round-robin.
@@ -128,7 +130,13 @@ func runSource(targets []string, port int, key []byte, interval time.Duration, c
 		labels = append(labels, label)
 	}
 
-	src, err := NewSource(chain, key, wait, os.Stdout, perHold)
+	// In JSON mode stdout carries the payload and nothing else, so per-probe
+	// lines go to stderr where a redirect to a file leaves them behind.
+	probeOut := io.Writer(os.Stdout)
+	if asJSON {
+		probeOut = os.Stderr
+	}
+	src, err := NewSource(chain, key, wait, probeOut, perHold)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "boomerang: %v\n", err)
 		os.Exit(1)
@@ -138,9 +146,9 @@ func runSource(targets []string, port int, key []byte, interval time.Duration, c
 	// Show what each name resolved to, like ping's "PING host (ip)".
 	dest := labels[len(labels)-1]
 	if len(labels) == 1 {
-		fmt.Printf("BOOMERANG %s direct\n", dest)
+		fmt.Fprintf(probeOut, "BOOMERANG %s direct\n", dest)
 	} else {
-		fmt.Printf("BOOMERANG %s via %s\n", dest, strings.Join(labels[:len(labels)-1], ", "))
+		fmt.Fprintf(probeOut, "BOOMERANG %s via %s\n", dest, strings.Join(labels[:len(labels)-1], ", "))
 	}
 
 	stop := make(chan struct{})
@@ -152,7 +160,16 @@ func runSource(targets []string, port int, key []byte, interval time.Duration, c
 	}()
 
 	src.Run(count, interval, stop)
-	fmt.Print(src.Stats().Summary(chain, perHold))
+	if asJSON {
+		payload, err := src.Stats().JSON(targets, chain, src.Local(), port)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "boomerang: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(payload))
+	} else {
+		fmt.Print(src.Stats().Summary(chain, perHold))
+	}
 
 	// Exit non-zero when nothing came back, matching ping so this works in a
 	// shell conditional.

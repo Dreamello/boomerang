@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Task 7 deploy: install the boomerang agent on one relay/destination host.
+# Install the boomerang agent on one relay/destination host.
 #
-# Hash-gated: truncated transfers can produce unusable binaries,
-# so nothing is installed unless the remote hash matches the local one.
+# Hash-gated: a truncated scp installs silently and segfaults later, so nothing
+# is installed unless the remote hash matches the local one.
 #
 # Usage: deploy-host.sh <ssh-target> <binary> <key> [--proxy]
+#   --proxy routes SSH/scp through a local SOCKS5 on 127.0.0.1:11111, which is
+#   for hosts requiring a proxy connection.
 set -euo pipefail
 
 TARGET="$1"; BIN="$2"; KEY="$3"; PROXY="${4:-}"

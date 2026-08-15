@@ -73,6 +73,10 @@ func (s *Source) Close() error { return s.conn.Close() }
 
 func (s *Source) Stats() *Stats { return s.stats }
 
+// Local reports the address the kernel chose for this route, which is what leg 0
+// starts from.
+func (s *Source) Local() string { return s.local }
+
 // send transmits one probe.
 func (s *Source) send(seq int) error {
 	p := &Packet{
