@@ -1,0 +1,7 @@
+# Go
+boomerang
+*.test
+*.out
+
+# Never commit the pre-shared key
+*.key
