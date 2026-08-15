@@ -86,11 +86,12 @@ func TestDeriveLegsSingleRelay(t *testing.T) {
 	if res.Legs[0].From != "src" {
 		t.Errorf("first leg should start at src, got %q", res.Legs[0].From)
 	}
-	if len(res.Procs) != 1 || res.Procs[0].Cost != 40_000 {
-		t.Errorf("procs: got %v want one entry of 40000ns", res.Procs)
+	if len(res.Holds) != 2 || res.Holds[0].Cost != 40_000 {
+		t.Errorf("holds: got %v want first entry 40000ns", res.Holds)
 	}
-	if res.DestTurnaround != 2*ms {
-		t.Errorf("dest turnaround: got %d want %d", res.DestTurnaround, 2*ms)
+	// The destination's hold is the turnaround: the last hold entry.
+	if got := res.Holds[len(res.Holds)-1].Cost; got != 2*ms {
+		t.Errorf("dest turnaround: got %d want %d", got, 2*ms)
 	}
 }
 
@@ -105,8 +106,9 @@ func TestDeriveLegsDirect(t *testing.T) {
 	if len(res.Legs) != 1 || res.Legs[0].RTT != 151*ms {
 		t.Errorf("got %v want one leg of 151ms", res.Legs)
 	}
-	if len(res.Procs) != 0 {
-		t.Errorf("a direct probe has no relays, got procs %v", res.Procs)
+	// A direct probe still has one hold: the destination's turnaround.
+	if len(res.Holds) != 1 {
+		t.Errorf("direct probe should have exactly one hold, got %v", res.Holds)
 	}
 }
 
@@ -136,10 +138,13 @@ func TestDeriveLegsArbitraryLength(t *testing.T) {
 					hops, i, res.Legs[i].RTT, legs[i])
 			}
 		}
+		if len(res.Holds) != hops {
+			t.Fatalf("hops=%d: got %d holds want %d", hops, len(res.Holds), hops)
+		}
 		for i := range proc {
-			if res.Procs[i].Cost != proc[i] {
-				t.Errorf("hops=%d proc %d: got %d want %d",
-					hops, i, res.Procs[i].Cost, proc[i])
+			if res.Holds[i].Cost != proc[i] {
+				t.Errorf("hops=%d hold %d: got %d want %d",
+					hops, i, res.Holds[i].Cost, proc[i])
 			}
 		}
 	}
@@ -188,11 +193,11 @@ func TestClockOffsetsCancel(t *testing.T) {
 					"clock offsets did NOT cancel", off, j, got[j], baseline[j])
 			}
 		}
-		// Processing costs are also single-clock differences, so they must hold too.
+		// Holds are also single-clock differences, so they must cancel too.
 		for j := range proc {
-			if res.Procs[j].Cost != proc[j] {
-				t.Errorf("offsets %v: proc %d got %d want %d",
-					off, j, res.Procs[j].Cost, proc[j])
+			if res.Holds[j].Cost != proc[j] {
+				t.Errorf("offsets %v: hold %d got %d want %d",
+					off, j, res.Holds[j].Cost, proc[j])
 			}
 		}
 	}
@@ -213,12 +218,13 @@ func TestTimeAccountingCloses(t *testing.T) {
 	for _, l := range res.Legs {
 		sum += l.RTT
 	}
-	for _, pr := range res.Procs {
-		sum += pr.Cost
+	// Holds already include the destination's turnaround, so legs + holds is
+	// the complete accounting.
+	for _, h := range res.Holds {
+		sum += h.Cost
 	}
-	sum += res.DestTurnaround
 	if sum != e2e {
-		t.Errorf("accounting does not close: legs+proc+turnaround=%d e2e=%d (diff %d)",
+		t.Errorf("accounting does not close: legs+holds=%d e2e=%d (diff %d)",
 			sum, e2e, e2e-sum)
 	}
 }
@@ -269,5 +275,42 @@ func TestDeriveLegsRejectsNegativeLeg(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "negative") {
 		t.Errorf("unclear error: %v", err)
+	}
+}
+
+// Guard against a vacuous offset test: prove the synthesised stamps really do
+// carry the per-node offsets, and that the naive cross-clock arithmetic these
+// tests are meant to rule out would in fact be broken by them.
+func TestOffsetTestHasTeeth(t *testing.T) {
+	legs := []int64{87 * ms, 35 * ms}
+	proc := []int64{40_000}
+	const sec = 1000 * ms
+
+	sync, _ := synth(t, legs, proc, 2*ms, []int64{0, 0})
+	skew, _ := synth(t, legs, proc, 2*ms, []int64{0, 3600 * sec})
+
+	sSync, _ := sync.Stamp(1)
+	sSkew, _ := skew.Stamp(1)
+	if sSync.TIn == sSkew.TIn {
+		t.Fatal("offsets are not reaching the stamps; the cancellation test is vacuous")
+	}
+	if got := sSkew.TIn - sSync.TIn; got != 3600*sec {
+		t.Errorf("destination offset applied as %d ns, want %d", got, 3600*sec)
+	}
+
+	// The naive approach boomerang deliberately avoids: subtracting timestamps
+	// taken on DIFFERENT nodes' clocks. It happens to work when clocks agree
+	// and blows up by exactly the offset when they do not.
+	naive := func(p *Packet) int64 {
+		relay, _ := p.Stamp(0)
+		dest, _ := p.Stamp(1)
+		return (dest.TIn - relay.TFwd) * 2 // cross-clock: unsound
+	}
+	if naive(sync) == naive(skew) {
+		t.Fatal("cross-clock arithmetic survived a 1h skew; the fixture cannot " +
+			"distinguish sound from unsound math")
+	}
+	if got := naive(skew) - naive(sync); got != 2*3600*sec {
+		t.Errorf("cross-clock error was %d ns, want %d", got, 2*3600*sec)
 	}
 }

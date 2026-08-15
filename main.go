@@ -7,8 +7,8 @@ package main
 //	boomerang 198.51.100.20                direct probe, no relays
 //	boomerang --agent                      relay or destination daemon
 //
-// The pre-shared key is read from a file, never from the command line, so it
-// cannot leak through ps output or shell history.
+// The pre-shared key is read from a file, keeping it out of ps output and shell
+// history.
 
 import (
 	"flag"
@@ -49,6 +49,7 @@ func main() {
 		bind      = flag.String("bind", "0.0.0.0", "agent bind address")
 		dropRate  = flag.Float64("debug-drop", 0, "agent: drop this fraction of packets (testing)")
 		verbose   = flag.Bool("v", false, "log dropped/unauthenticated packets")
+		perHold   = flag.Bool("holds", false, "show hold time per node instead of one total")
 	)
 	flag.Usage = usage
 	flag.Parse()
@@ -71,7 +72,7 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
-	runSource(targets, *port, key, *interval, *count, *wait)
+	runSource(targets, *port, key, *interval, *count, *wait, *perHold)
 }
 
 func usage() {
@@ -111,24 +112,35 @@ func runAgent(bind string, port int, key []byte, dropRate float64, verbose bool)
 	}
 }
 
-func runSource(targets []string, port int, key []byte, interval time.Duration, count int, wait time.Duration) {
+func runSource(targets []string, port int, key []byte, interval time.Duration, count int, wait time.Duration, perHold bool) {
+	// Resolve every hop once, here, and put addresses on the wire: DNS stays
+	// outside the measured intervals, and the chain is pinned to the hosts
+	// resolved at startup even under GeoDNS or round-robin.
 	chain := make([]string, 0, len(targets))
+	labels := make([]string, 0, len(targets))
 	for _, t := range targets {
-		chain = append(chain, withPort(t, port))
+		addr, label, err := resolveHop(t, port)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "boomerang: %v\n", err)
+			os.Exit(1)
+		}
+		chain = append(chain, addr)
+		labels = append(labels, label)
 	}
 
-	src, err := NewSource(chain, key, wait, os.Stdout)
+	src, err := NewSource(chain, key, wait, os.Stdout, perHold)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "boomerang: %v\n", err)
 		os.Exit(1)
 	}
 	defer src.Close()
 
-	dest := chain[len(chain)-1]
-	if len(chain) == 1 {
+	// Show what each name resolved to, like ping's "PING host (ip)".
+	dest := labels[len(labels)-1]
+	if len(labels) == 1 {
 		fmt.Printf("BOOMERANG %s direct\n", dest)
 	} else {
-		fmt.Printf("BOOMERANG %s via %s\n", dest, strings.Join(chain[:len(chain)-1], ", "))
+		fmt.Printf("BOOMERANG %s via %s\n", dest, strings.Join(labels[:len(labels)-1], ", "))
 	}
 
 	stop := make(chan struct{})
@@ -140,19 +152,33 @@ func runSource(targets []string, port int, key []byte, interval time.Duration, c
 	}()
 
 	src.Run(count, interval, stop)
-	fmt.Print(src.Stats().Summary(chain))
+	fmt.Print(src.Stats().Summary(chain, perHold))
 
-	// Exit non-zero when nothing came back, matching ping's convention so this
-	// is usable in a shell conditional.
+	// Exit non-zero when nothing came back, matching ping so this works in a
+	// shell conditional.
 	if src.Stats().recv == 0 {
 		os.Exit(1)
 	}
 }
 
-// withPort appends the default port unless the target already carries one.
-func withPort(target string, port int) string {
-	if _, _, err := net.SplitHostPort(target); err == nil {
-		return target
+// resolveHop turns a user-supplied target into a wire address plus a display
+// label. Resolution happens here, once per run; addresses go on the wire.
+//
+// The label follows ping's "host (ip)" convention when a name was given, so the
+// user sees what it resolved to. A literal address is its own label.
+func resolveHop(target string, port int) (addr, label string, err error) {
+	host, portStr, err := net.SplitHostPort(target)
+	if err != nil {
+		host, portStr = target, fmt.Sprint(port)
 	}
-	return net.JoinHostPort(target, fmt.Sprint(port))
+	ua, err := net.ResolveUDPAddr("udp", net.JoinHostPort(host, portStr))
+	if err != nil {
+		return "", "", fmt.Errorf("resolve %q: %w", target, err)
+	}
+	addr = net.JoinHostPort(ua.IP.String(), portStr)
+	if net.ParseIP(host) != nil {
+		// A literal address: nothing was resolved, so nothing to disclose.
+		return addr, shortAddr(addr), nil
+	}
+	return addr, fmt.Sprintf("%s (%s)", host, ua.IP), nil
 }

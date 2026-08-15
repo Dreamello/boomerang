@@ -10,13 +10,14 @@ package main
 //
 // Because the route and the stamps travel in the packet, relays and the
 // destination run the identical binary with identical flags, and adding a hop
-// never reconfigures an existing node.
+// only means starting an agent there and naming it at the source.
 
 import (
 	"fmt"
 	"log"
 	"math/rand"
 	"net"
+	"strconv"
 	"time"
 )
 
@@ -73,16 +74,15 @@ func (a *Agent) Serve() error {
 		if err != nil {
 			return err // closed, or unrecoverable
 		}
-		// Stamp arrival before any parsing, so decode cost lands in this
-		// node's processing time rather than inflating a leg.
+		// Stamp arrival before parsing, so decode cost lands in this node's
+		// hold figure.
 		arrived := a.now()
 		a.handle(buf[:n], src, arrived)
 	}
 }
 
 // handle processes one datagram. Unauthenticated or malformed traffic is
-// dropped silently: no reply, no log line, so a scanner learns nothing and
-// cannot fill the journal.
+// dropped silently, so a scanner gets no response and leaves no journal noise.
 func (a *Agent) handle(raw []byte, src *net.UDPAddr, arrived int64) {
 	p, err := Decode(raw, a.key)
 	if err != nil {
@@ -110,9 +110,9 @@ func (a *Agent) handle(raw []byte, src *net.UDPAddr, arrived int64) {
 // forwardOrTurn handles an outbound probe.
 //
 // Invariant on Hop, maintained by every node: p.Hop is the index of the node
-// that should handle this packet NEXT. Outbound that means incrementing;
-// turning around and unwinding it means decrementing, so a returning packet
-// stamps against the hop that actually handled it.
+// that should handle this packet NEXT. Outbound increments it; turning around
+// and unwinding decrements it, so a returning packet stamps against the hop
+// that handled it.
 func (a *Agent) forwardOrTurn(p *Packet, src *net.UDPAddr, arrived int64) {
 	hop := p.Hop
 	p.StampIn(hop, arrived)
@@ -122,8 +122,8 @@ func (a *Agent) forwardOrTurn(p *Packet, src *net.UDPAddr, arrived int64) {
 	p.AppendReply(src.String())
 
 	if p.IsLast() {
-		// Destination: turn it around. TOut is taken as late as possible so the
-		// turnaround reflects real work, not our own bookkeeping.
+		// Destination: turn it around, stamping TOut as late as possible so the
+		// turnaround reflects the real dwell time.
 		p.Phase = PhaseBack
 		back, ok := p.ReturnAddr()
 		if !ok {
@@ -144,9 +144,8 @@ func (a *Agent) forwardOrTurn(p *Packet, src *net.UDPAddr, arrived int64) {
 	a.served++
 }
 
-// prevHop steps one hop back toward the source, clamped so the packet stays
-// decodable: Hop must remain a valid index into Chain even on the final leg
-// home, where there is no previous hop.
+// prevHop steps one hop back toward the source, clamping at 0 so Hop stays a
+// valid index into Chain on the final leg home.
 func prevHop(hop int) int {
 	if hop <= 0 {
 		return 0
@@ -167,13 +166,16 @@ func (a *Agent) unwind(p *Packet, arrived int64) {
 	a.send(p, back)
 }
 
-// send encodes and transmits, resolving the destination each time. Resolution
-// stays per-send so an agent holds no cached routing state.
+// send encodes and transmits to a literal IP:port.
+//
+// Agents resolve nothing. The source resolves the whole chain once and puts
+// addresses on the wire, which keeps DNS out of the interval between this
+// node's two timestamps and out of reach of anyone crafting a packet.
 func (a *Agent) send(p *Packet, addr string) {
-	ua, err := net.ResolveUDPAddr("udp", addr)
+	ua, err := parseAddr(addr)
 	if err != nil {
 		if a.verbose {
-			log.Printf("resolve %s: %v", addr, err)
+			log.Printf("refusing to send to %q: %v", addr, err)
 		}
 		return
 	}
@@ -187,6 +189,24 @@ func (a *Agent) send(p *Packet, addr string) {
 	if _, err := a.conn.WriteToUDP(buf, ua); err != nil && a.verbose {
 		log.Printf("send to %s: %v", addr, err)
 	}
+}
+
+// parseAddr accepts a literal IP:port, keeping every relay send path free of
+// name lookups.
+func parseAddr(addr string) (*net.UDPAddr, error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return nil, fmt.Errorf("%q is not a literal address", host)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("bad port %q: %w", portStr, err)
+	}
+	return &net.UDPAddr{IP: ip, Port: port}, nil
 }
 
 // Stats renders a one-line health summary.

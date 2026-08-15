@@ -39,7 +39,7 @@ func runChain(t *testing.T, hops, count int, dropRate float64) (*Stats, string, 
 		chain[i] = startAgent(t, key, dropRate)
 	}
 	out := &syncBuf{}
-	src, err := NewSource(chain, key, 500*time.Millisecond, out)
+	src, err := NewSource(chain, key, 500*time.Millisecond, out, false)
 	if err != nil {
 		t.Fatalf("NewSource: %v", err)
 	}
@@ -62,9 +62,10 @@ func TestIntegrationTimeAccountingCloses(t *testing.T) {
 		if len(st.order) != hops {
 			t.Errorf("hops=%d: measured %d legs", hops, len(st.order))
 		}
-		if len(st.pOrd) != hops-1 {
-			t.Errorf("hops=%d: measured %d relay proc series want %d",
-				hops, len(st.pOrd), hops-1)
+		// One hold per hop: every relay plus the destination.
+		if len(st.hOrd) != hops {
+			t.Errorf("hops=%d: measured %d hold series want %d",
+				hops, len(st.hOrd), hops)
 		}
 
 		// legs + processing + destination turnaround must reconstruct e2e.
@@ -73,13 +74,13 @@ func TestIntegrationTimeAccountingCloses(t *testing.T) {
 		for _, k := range st.order {
 			sum += st.legs[k].avg()
 		}
-		for _, k := range st.pOrd {
-			sum += st.procs[k].avg()
+		for _, k := range st.hOrd {
+			sum += st.holds[k].avg()
 		}
 		tol := 0.5 * float64(hops)
-		if diff := st.e2e.avg() - sum; diff < -tol || diff > tol+0.5 {
+		if diff := st.total.avg() - sum; diff < -tol || diff > tol+0.5 {
 			t.Errorf("hops=%d: accounting off by %.3f ms (legs+proc=%.3f e2e=%.3f)",
-				hops, diff, sum, st.e2e.avg())
+				hops, diff, sum, st.total.avg())
 		}
 
 		// Every sample must be non-negative and physically plausible.
@@ -88,9 +89,9 @@ func TestIntegrationTimeAccountingCloses(t *testing.T) {
 				t.Errorf("hops=%d: negative leg on %s: %.3f", hops, k, st.legs[k].min())
 			}
 		}
-		for _, k := range st.pOrd {
-			if st.procs[k].min() < 0 {
-				t.Errorf("hops=%d: negative proc at %s", hops, k)
+		for _, k := range st.hOrd {
+			if st.holds[k].min() < 0 {
+				t.Errorf("hops=%d: negative hold at %s", hops, k)
 			}
 		}
 	}
@@ -119,7 +120,7 @@ func TestIntegrationLossCounted(t *testing.T) {
 	if !strings.Contains(out, "timeout") {
 		t.Errorf("timeouts should be visible:\n%s", out)
 	}
-	summary := st.Summary(chain)
+	summary := st.Summary(chain, false)
 	if !strings.Contains(summary, "100.0% loss") {
 		t.Errorf("summary must state the loss:\n%s", summary)
 	}
@@ -131,7 +132,7 @@ func TestIntegrationSurvivesPartialLoss(t *testing.T) {
 	dest := startAgent(t, key, 0)
 	lossy := startAgent(t, key, 0.5) // relay drops half
 	out := &syncBuf{}
-	src, err := NewSource([]string{lossy, dest}, key, 300*time.Millisecond, out)
+	src, err := NewSource([]string{lossy, dest}, key, 300*time.Millisecond, out, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,8 +149,13 @@ func TestIntegrationSurvivesPartialLoss(t *testing.T) {
 	if st.recv == st.sent {
 		t.Skip("no probes dropped despite a 50% rate; rerun")
 	}
-	// Whatever survived must still be internally consistent.
-	if st.legs["src -> "+lossy].min() < 0 {
+	// Whatever survived must still be internally consistent. Look the series up
+	// by position rather than by label: leg0's name is the local address the
+	// kernel chose, which the test cannot predict.
+	if len(st.order) == 0 {
+		t.Fatal("no leg series recorded")
+	}
+	if st.legs[st.order[0]].min() < 0 {
 		t.Error("negative leg among surviving probes")
 	}
 	if st.Loss() <= 0 || st.Loss() >= 100 {
@@ -163,7 +169,7 @@ func TestIntegrationStopSignal(t *testing.T) {
 	dest := startAgent(t, key, 0)
 	relay := startAgent(t, key, 0)
 	out := &syncBuf{}
-	src, err := NewSource([]string{relay, dest}, key, time.Second, out)
+	src, err := NewSource([]string{relay, dest}, key, time.Second, out, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +191,7 @@ func TestIntegrationStopSignal(t *testing.T) {
 	if st.sent == 0 {
 		t.Error("no probes sent before stop")
 	}
-	if !strings.Contains(st.Summary([]string{relay, dest}), "probes sent") {
+	if !strings.Contains(st.Summary([]string{relay, dest}, false), "probes sent") {
 		t.Error("summary missing after stop")
 	}
 }
@@ -198,7 +204,7 @@ func TestIntegrationSourceIgnoresForgedReply(t *testing.T) {
 	dest := startAgent(t, key, 0)
 
 	out := &syncBuf{}
-	src, err := NewSource([]string{dest}, other, 200*time.Millisecond, out)
+	src, err := NewSource([]string{dest}, other, 200*time.Millisecond, out, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,10 +225,11 @@ func TestIntegrationDirectProbe(t *testing.T) {
 	if len(st.order) != 1 {
 		t.Errorf("direct probe should measure exactly one leg, got %d", len(st.order))
 	}
-	if len(st.pOrd) != 0 {
-		t.Errorf("direct probe has no relays, got proc series %v", st.pOrd)
+	// A direct probe has one hold series: the destination's turnaround.
+	if len(st.hOrd) != 1 {
+		t.Errorf("direct probe should have one hold series, got %v", st.hOrd)
 	}
-	if !strings.Contains(st.Summary(chain), "direct") {
+	if !strings.Contains(st.Summary(chain, false), "direct") {
 		t.Error("summary should say direct")
 	}
 }

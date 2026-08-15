@@ -8,15 +8,13 @@ package main
 import (
 	"fmt"
 	"math"
-	"sort"
 	"strings"
 	"time"
 )
 
-// series accumulates samples for one measured quantity.
+// series accumulates samples for one measured quantity, in ms.
 type series struct {
-	name    string
-	samples []float64 // ms
+	samples []float64
 }
 
 func (s *series) add(ns int64) { s.samples = append(s.samples, float64(ns)/1e6) }
@@ -67,21 +65,28 @@ func (s *series) mdev() float64 {
 
 // Stats collects every series across a run.
 type Stats struct {
-	sent  int
-	recv  int
-	late  int
-	e2e   series
-	legs  map[string]*series
-	procs map[string]*series
-	order []string // leg keys, in chain order
-	pOrd  []string // proc keys, in chain order
-	start time.Time
+	sent      int
+	recv      int
+	late      int
+	cancelled int
+	total     series
+	legs      map[string]*series
+	holds     map[string]*series
+	order     []string // leg keys, in chain order
+	hOrd      []string // hold keys, in chain order
+	// ends maps a leg key to its {from, to} endpoints, kept apart so the table
+	// can pad each side into its own column and line the arrows up.
+	ends map[string][2]string
+	// holdAll aggregates every node's hold per probe, for the default view.
+	holdAll series
+	start   time.Time
 }
 
 func NewStats() *Stats {
 	return &Stats{
 		legs:  map[string]*series{},
-		procs: map[string]*series{},
+		holds: map[string]*series{},
+		ends:  map[string][2]string{},
 		start: time.Now(),
 	}
 }
@@ -89,28 +94,40 @@ func NewStats() *Stats {
 func (st *Stats) Sent() { st.sent++ }
 func (st *Stats) Late() { st.late++ }
 
+// Cancelled removes interrupted probes from the run's totals, so loss reflects
+// only probes that ran their full deadline.
+func (st *Stats) Cancelled(n int) {
+	st.sent -= n
+	if st.sent < 0 {
+		st.sent = 0
+	}
+	st.cancelled += n
+}
+
 // Add folds one returned probe into the running statistics.
 func (st *Stats) Add(res *Result) {
 	st.recv++
-	st.e2e.add(res.E2E)
+	st.total.add(res.E2E)
+	st.holdAll.add(res.HoldTotal())
 	for _, l := range res.Legs {
 		key := l.From + " -> " + l.To
 		s, ok := st.legs[key]
 		if !ok {
-			s = &series{name: key}
+			s = &series{}
 			st.legs[key] = s
 			st.order = append(st.order, key)
+			st.ends[key] = [2]string{shortAddr(l.From), shortAddr(l.To)}
 		}
 		s.add(l.RTT)
 	}
-	for _, p := range res.Procs {
-		s, ok := st.procs[p.At]
+	for _, h := range res.Holds {
+		s, ok := st.holds[h.At]
 		if !ok {
-			s = &series{name: p.At}
-			st.procs[p.At] = s
-			st.pOrd = append(st.pOrd, p.At)
+			s = &series{}
+			st.holds[h.At] = s
+			st.hOrd = append(st.hOrd, h.At)
 		}
-		s.add(p.Cost)
+		s.add(h.Cost)
 	}
 }
 
@@ -124,23 +141,33 @@ func (st *Stats) Loss() float64 {
 
 // ProbeLine renders the per-probe line printed as each reply lands.
 //
-// Precision is fixed at 0.01 ms deliberately: the measurement floor on this
-// path is macOS scheduling jitter of roughly +/-0.5 ms, so more digits would
-// imply accuracy that is not there.
-func ProbeLine(res *Result) string {
+// Leg indices follow the chain; the header and summary table carry the
+// addresses they refer to.
+//
+// perHold (--holds) splits the hold figure per node. The default aggregate is a
+// sum, so the line stays arithmetically closed: legs + hold = total.
+//
+// Precision is 0.01 ms, matching the measurement floor set by host scheduling
+// jitter of roughly half a millisecond.
+func ProbeLine(res *Result, perHold bool) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "seq=%d e2e=%.2fms", res.Seq, msOf(res.E2E))
+	fmt.Fprintf(&b, "seq=%d", res.Seq)
 	for i, l := range res.Legs {
-		fmt.Fprintf(&b, "  leg%d[%s]=%.2fms", i, shortPair(l.From, l.To), msOf(l.RTT))
+		fmt.Fprintf(&b, " leg%d=%.2fms", i, msOf(l.RTT))
 	}
-	for _, p := range res.Procs {
-		fmt.Fprintf(&b, "  proc[%s]=%.2fms", shortAddr(p.At), msOf(p.Cost))
+	if perHold {
+		for i, h := range res.Holds {
+			fmt.Fprintf(&b, " hold%d=%.2fms", i, msOf(h.Cost))
+		}
+	} else {
+		fmt.Fprintf(&b, " hold=%.2fms", msOf(res.HoldTotal()))
 	}
+	fmt.Fprintf(&b, " total=%.2fms", msOf(res.E2E))
 	return b.String()
 }
 
 // Summary renders the ping-style block printed at exit.
-func (st *Stats) Summary(chain []string) string {
+func (st *Stats) Summary(chain []string, perHold bool) string {
 	var b strings.Builder
 	target := "direct"
 	if len(chain) > 1 {
@@ -159,21 +186,27 @@ func (st *Stats) Summary(chain []string) string {
 		return b.String()
 	}
 
-	rows := [][]string{{"", "min", "avg", "max", "mdev", "n"}}
-	rows = append(rows, row("e2e", &st.e2e))
+	rows := [][]string{{"", "", "", "", "min", "avg", "max", "mdev", "n"}}
 	for i, k := range st.order {
-		rows = append(rows, row(fmt.Sprintf("leg%d %s", i, k), st.legs[k]))
+		e := st.ends[k]
+		rows = append(rows, row(fmt.Sprintf("leg%d", i), e[0], "->", e[1], st.legs[k]))
 	}
-	for _, k := range st.pOrd {
-		rows = append(rows, row("proc "+shortAddr(k), st.procs[k]))
+	if perHold {
+		for i, k := range st.hOrd {
+			rows = append(rows, row(fmt.Sprintf("hold%d", i), shortAddr(k), "", "", st.holds[k]))
+		}
+	} else {
+		rows = append(rows, row("hold", "", "", "", &st.holdAll))
 	}
+	// total last: it is the whole of which every row above is a part.
+	rows = append(rows, row("total", "", "", "", &st.total))
 	b.WriteString(renderTable(rows))
 	return b.String()
 }
 
-func row(label string, s *series) []string {
+func row(name, from, arrow, to string, s *series) []string {
 	return []string{
-		label,
+		name, from, arrow, to,
 		fmt.Sprintf("%.2f", s.min()),
 		fmt.Sprintf("%.2f", s.avg()),
 		fmt.Sprintf("%.2f", s.max()),
@@ -181,6 +214,9 @@ func row(label string, s *series) []string {
 		fmt.Sprintf("%d", s.n()),
 	}
 }
+
+// labelCols is how many leading columns are text: name, from, arrow, to.
+const labelCols = 4
 
 // renderTable pads columns so the numbers line up in a terminal.
 func renderTable(rows [][]string) string {
@@ -197,13 +233,20 @@ func renderTable(rows [][]string) string {
 	}
 	var b strings.Builder
 	for _, r := range rows {
+		var line strings.Builder
 		for i, c := range r {
-			if i == 0 {
-				fmt.Fprintf(&b, "%-*s", w[i], c)
-			} else {
-				fmt.Fprintf(&b, "  %*s", w[i], c)
+			switch {
+			case i == 0:
+				fmt.Fprintf(&line, "%-*s", w[i], c)
+			case i < labelCols:
+				// Endpoint columns are padded independently, which is what puts
+				// every arrow in the same screen column.
+				fmt.Fprintf(&line, " %-*s", w[i], c)
+			default:
+				fmt.Fprintf(&line, "  %*s", w[i], c)
 			}
 		}
+		b.WriteString(strings.TrimRight(line.String(), " "))
 		b.WriteString("\n")
 	}
 	return b.String()
@@ -219,18 +262,4 @@ func shortAddr(a string) string {
 		}
 	}
 	return a
-}
-
-func shortPair(from, to string) string {
-	return shortAddr(from) + "<->" + shortAddr(to)
-}
-
-// sortedKeys is used only by tests that need deterministic iteration.
-func sortedKeys(m map[string]*series) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }

@@ -7,13 +7,13 @@ Wants=network-online.target
 Type=simple
 # systemd reads the key as root and re-exposes it under $CREDENTIALS_DIRECTORY
 # (%d) owned by this service's user, mode 0400. That is what lets the agent run
-# unprivileged without loosening the key's permissions or creating a user.
+# unprivileged while the key stays root-owned.
 LoadCredential=key:/etc/boomerang.key
 ExecStart=/usr/local/bin/boomerang --agent --port 8888 --key-file %d/key
 Restart=always
 RestartSec=2
 
-# The agent needs one UDP socket and one credential. Nothing else.
+# The agent needs one UDP socket and one credential.
 DynamicUser=yes
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -31,8 +31,7 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 CapabilityBoundingSet=
 
-# Port 8888 is unprivileged, so no binding capability is required. A port below
-# 1024 would need: AmbientCapabilities=CAP_NET_BIND_SERVICE
+# Port 8888 is unprivileged, so the agent binds with no capabilities at all.
 
 [Install]
 WantedBy=multi-user.target

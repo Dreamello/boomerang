@@ -19,6 +19,10 @@ type Source struct {
 	first   *net.UDPAddr
 	timeout time.Duration
 	out     io.Writer
+	// perHold splits the hold figure per node instead of one aggregate.
+	perHold bool
+	// local is the address the kernel chose for this route, used to label leg0.
+	local string
 
 	mu       sync.Mutex
 	inFlight map[int]time.Time // seq -> send time, on this process's clock
@@ -26,17 +30,30 @@ type Source struct {
 }
 
 // NewSource dials the first hop and prepares a run.
-func NewSource(chain []string, key []byte, timeout time.Duration, out io.Writer) (*Source, error) {
+func NewSource(chain []string, key []byte, timeout time.Duration, out io.Writer, perHold bool) (*Source, error) {
 	if len(chain) == 0 {
 		return nil, errors.New("need at least one target")
 	}
-	first, err := net.ResolveUDPAddr("udp", chain[0])
+	// The chain arrives already resolved, so this parses and enforces that
+	// invariant here, in one place.
+	first, err := parseAddr(chain[0])
 	if err != nil {
-		return nil, fmt.Errorf("resolve %s: %w", chain[0], err)
+		return nil, fmt.Errorf("first hop %q must be a literal address: %w", chain[0], err)
 	}
 	conn, err := net.ListenUDP("udp", nil)
 	if err != nil {
 		return nil, err
+	}
+	// Label leg0 with the local address the kernel picks for this route. An
+	// unbound socket has no address until it has a destination, so ask which
+	// source a connection to the first hop would use: on a multi-homed host
+	// that is per-route, so this is the address the probes actually leave by.
+	local := "src"
+	if probe, err := net.DialUDP("udp", nil, first); err == nil {
+		if ua, ok := probe.LocalAddr().(*net.UDPAddr); ok {
+			local = ua.IP.String()
+		}
+		_ = probe.Close()
 	}
 	return &Source{
 		conn:     conn,
@@ -45,6 +62,8 @@ func NewSource(chain []string, key []byte, timeout time.Duration, out io.Writer)
 		first:    first,
 		timeout:  timeout,
 		out:      out,
+		perHold:  perHold,
+		local:    local,
 		inFlight: map[int]time.Time{},
 		stats:    NewStats(),
 	}, nil
@@ -100,9 +119,8 @@ func (s *Source) receive() {
 		s.mu.Unlock()
 
 		if !known {
-			// Already timed out, or a duplicate. Counted, never folded into
-			// the statistics -- a reply that missed its deadline would bias
-			// the numbers toward the slow tail.
+			// Already timed out, or a duplicate: counted separately so the
+			// statistics stay over probes that met their deadline.
 			s.mu.Lock()
 			s.stats.Late()
 			s.mu.Unlock()
@@ -116,10 +134,15 @@ func (s *Source) receive() {
 			fmt.Fprintf(s.out, "seq=%d unusable: %v\n", p.Seq, err)
 			continue
 		}
+		// DeriveLegs labels the first leg "src"; replace it with the real
+		// local address now that one is known.
+		if len(res.Legs) > 0 && res.Legs[0].From == "src" {
+			res.Legs[0].From = s.local
+		}
 		s.mu.Lock()
 		s.stats.Add(res)
 		s.mu.Unlock()
-		fmt.Fprintln(s.out, ProbeLine(res))
+		fmt.Fprintln(s.out, ProbeLine(res, s.perHold))
 	}
 }
 
@@ -138,6 +161,20 @@ func (s *Source) sweep(now time.Time) {
 	for _, seq := range lost {
 		fmt.Fprintf(s.out, "seq=%d timeout\n", seq)
 	}
+}
+
+// cancel discards probes that were still within their deadline when the user
+// interrupted the run.
+//
+// A cancelled probe leaves both totals, so loss is computed only over probes
+// that were given their full deadline.
+func (s *Source) cancel() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := len(s.inFlight)
+	s.inFlight = map[int]time.Time{}
+	s.stats.Cancelled(n)
+	return n
 }
 
 // Run sends count probes at the given interval (count <= 0 runs until stop is
@@ -160,10 +197,15 @@ func (s *Source) Run(count int, interval time.Duration, stop <-chan struct{}) {
 	}
 	seq++
 
+	// Interrupted runs cancel probes still inside their deadline; a run that
+	// ends on its own terms lets them expire as loss.
+	interrupted := false
+
 sendLoop:
 	for count <= 0 || seq < count {
 		select {
 		case <-stop:
+			interrupted = true
 			break sendLoop
 		case <-sweeper.C:
 			s.sweep(time.Now())
@@ -181,6 +223,7 @@ drain:
 	for {
 		select {
 		case <-stop:
+			interrupted = true
 			break drain
 		case <-sweeper.C:
 			s.sweep(time.Now())
@@ -194,7 +237,14 @@ drain:
 			break drain
 		}
 	}
-	s.sweep(time.Now().Add(s.timeout + time.Second)) // expire whatever is left
+	if interrupted {
+		// Cancelled: these probes were cut short of their deadline.
+		s.cancel()
+	} else {
+		// The run finished on its own terms: anything still outstanding has
+		// genuinely exceeded its deadline.
+		s.sweep(time.Now().Add(s.timeout + time.Second))
+	}
 	_ = s.conn.Close()
 	<-done
 }

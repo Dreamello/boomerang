@@ -12,14 +12,18 @@ package main
 //	I0    = t3 - t0                E2E RTT, source clock
 //	W(k)  = t_out - t_in           full window at hop k, hop k's clock
 //	W'(k) = t_rcv - t_fwd          wire-only window at hop k, hop k's clock
-//	W(D)  = t_out - t_in           destination turnaround, destination's clock
 //
 //	leg 0        = I0     - W(0)      source <-> first hop
 //	leg k        = W'(k-1) - W(k)     hop k-1 <-> hop k
-//	proc k       = W(k)   - W'(k)     hop k's own processing cost
+//	hold k       = W(k)   - W'(k)     time hop k held the packet
 //
-// The destination has no wire-only window (it turns the packet around rather
-// than forwarding), so its full window terminates the chain.
+// The destination turns the packet around, so its full window is its hold and
+// terminates the chain. Hold is therefore uniform: one per hop, covering two
+// transits at a relay and one at the destination.
+//
+// Legs and holds together account for the measured round trip exactly:
+//
+//	sum(legs) + sum(holds) = e2e
 
 import "fmt"
 
@@ -30,8 +34,9 @@ type Leg struct {
 	RTT  int64 // ns, round trip across this leg only
 }
 
-// Proc is one relay's own processing cost, in and out combined.
-type Proc struct {
+// Hold is time a node spent holding the packet: inbound plus outbound
+// processing at a relay, the turnaround at the destination.
+type Hold struct {
 	At   string
 	Cost int64 // ns
 }
@@ -39,20 +44,25 @@ type Proc struct {
 // Result is everything derivable from a single returned probe.
 type Result struct {
 	Seq   int
-	E2E   int64 // ns, source clock
+	E2E   int64 // ns, source clock -- measured directly, not summed
 	Legs  []Leg
-	Procs []Proc
-	// DestTurnaround is the destination's own in-to-out time: real work that
-	// belongs to neither adjacent leg.
-	DestTurnaround int64
+	Holds []Hold // one per hop, same order and length as Legs
+}
+
+// HoldTotal is the combined time every node held the packet.
+func (r *Result) HoldTotal() int64 {
+	var sum int64
+	for _, h := range r.Holds {
+		sum += h.Cost
+	}
+	return sum
 }
 
 // DeriveLegs computes per-leg RTTs from a returned probe.
 //
 // e2e is measured on the source's clock; every other input comes from the
 // packet's stamps. A negative leg means the arithmetic was fed inconsistent
-// stamps (a bug or a forged packet), so it is reported as an error rather than
-// silently clamped.
+// stamps (a bug or a forged packet), so it is reported as an error.
 func DeriveLegs(p *Packet, e2e int64) (*Result, error) {
 	if len(p.Chain) == 0 {
 		return nil, ErrChain
@@ -74,9 +84,6 @@ func DeriveLegs(p *Packet, e2e int64) (*Result, error) {
 		}
 	}
 
-	dest, _ := p.Stamp(last)
-	res.DestTurnaround = dest.TOut - dest.TIn
-
 	// upstream is the interval measured by the previous node: the source's E2E
 	// for leg 0, then each relay's wire-only window.
 	upstream := e2e
@@ -95,13 +102,15 @@ func DeriveLegs(p *Packet, e2e int64) (*Result, error) {
 		res.Legs = append(res.Legs, Leg{From: from, To: p.Chain[n], RTT: leg})
 
 		if n == last {
+			// Destination: its full window is the turnaround.
+			res.Holds = append(res.Holds, Hold{At: p.Chain[n], Cost: full})
 			break
 		}
 		wire := s.TRcv - s.TFwd
 		if wire < 0 {
 			return nil, fmt.Errorf("relay %d (%s): rcv before fwd", n, p.Chain[n])
 		}
-		res.Procs = append(res.Procs, Proc{At: p.Chain[n], Cost: full - wire})
+		res.Holds = append(res.Holds, Hold{At: p.Chain[n], Cost: full - wire})
 		upstream = wire
 		from = p.Chain[n]
 	}

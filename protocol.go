@@ -7,10 +7,9 @@ package main
 // between nodes cancel when legs are derived by differencing adjacent
 // intervals (see legs.go).
 //
-// Every packet is authenticated with a truncated HMAC-SHA-256 tag. An agent
-// sends to addresses named INSIDE the packet, so without a MAC anyone could
-// make a relay originate UDP at an arbitrary target. Bad MACs are dropped
-// silently: no reply, no log line.
+// Every packet is authenticated with a truncated HMAC-SHA-256 tag, because an
+// agent sends to addresses named INSIDE the packet: the MAC is what binds that
+// routing to a holder of the shared key. Bad MACs are dropped silently.
 
 import (
 	"crypto/hmac"
@@ -68,9 +67,9 @@ type Stamp struct {
 
 // Packet is the on-wire probe.
 //
-// Timestamps are int64 nanoseconds, never float64: ns since process start
-// exceeds float64's 53-bit exact-integer range after ~104 days of uptime, and
-// a long-lived relay will get there. Typed structs keep encoding/json exact.
+// Timestamps are int64 nanoseconds: ns since process start passes float64's
+// 53-bit exact-integer range after ~104 days of uptime, which a long-lived
+// relay reaches. Typed structs keep encoding/json exact.
 type Packet struct {
 	V      int      `json:"v"`
 	Seq    int      `json:"seq"`
@@ -101,15 +100,14 @@ var (
 
 // LoadKey reads a hex-encoded pre-shared key from disk.
 //
-// The key is never accepted from argv or the environment, so it cannot leak
-// through `ps` or shell history.
+// The key comes from a file, keeping it out of argv, the environment, `ps`, and
+// shell history.
 //
-// The permission check refuses a world-accessible file, which is exactly what a
-// bare `openssl rand -hex 32 > key` leaves behind under a default umask. Group
-// bits are allowed: group access is an explicit administrative grant, and
-// systemd's LoadCredential= hands the agent a 0440 root:root file inside a 0550
-// root:root directory -- tighter than 0600 in practice, since only root and the
-// service's own user can reach it at all.
+// The permission check requires the file be unreadable to other users, catching
+// what a bare `openssl rand -hex 32 > key` leaves under a default umask. Group
+// bits are an explicit administrative grant and are allowed: systemd's
+// LoadCredential= hands the agent a 0440 root:root file inside a 0550 root:root
+// directory, reachable only by root and the service's own user.
 func LoadKey(path string) ([]byte, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -148,9 +146,9 @@ func Encode(p *Packet, key []byte) ([]byte, error) {
 	return json.Marshal(signed{P: body, Tag: hex.EncodeToString(tag(key, body))})
 }
 
-// Decode authenticates and unmarshals a packet. It returns ErrBadMAC for
-// anything that fails verification, including truncated or unrelated traffic,
-// so callers can drop silently without branching on the reason.
+// Decode authenticates and unmarshals a packet. Anything failing verification,
+// including truncated or unrelated traffic, returns ErrBadMAC so callers can
+// drop it on one condition.
 func Decode(buf []byte, key []byte) (*Packet, error) {
 	if len(buf) < 2 {
 		return nil, ErrShort
@@ -226,8 +224,8 @@ func (p *Packet) Stamp(n int) (Stamp, bool) {
 }
 
 // AppendReply records the address this packet was received from, so the return
-// path can be unwound without any relay holding state. The chain alone cannot
-// do this: a NAT'd source's observable address is only known to the first hop.
+// path unwinds without any relay holding state. This is what carries a NAT'd
+// source's observable address, which only its first hop can see.
 func (p *Packet) AppendReply(addr string) { p.Reply = append(p.Reply, addr) }
 
 // ReturnAddr pops the address to send back to while unwinding.

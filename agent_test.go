@@ -102,8 +102,8 @@ func TestAgentChainOneRelay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeriveLegs on a live probe: %v", err)
 	}
-	if len(res.Legs) != 2 || len(res.Procs) != 1 {
-		t.Errorf("got %d legs %d procs want 2/1", len(res.Legs), len(res.Procs))
+	if len(res.Legs) != 2 || len(res.Holds) != 2 {
+		t.Errorf("got %d legs %d holds want 2/2", len(res.Legs), len(res.Holds))
 	}
 }
 
@@ -204,5 +204,35 @@ func TestAgentStampsAreMonotonic(t *testing.T) {
 			t.Fatalf("clock went backwards: %d then %d", prev, n)
 		}
 		prev = n
+	}
+}
+
+func TestAgentRefusesHostnames(t *testing.T) {
+	cases := []struct {
+		addr string
+		ok   bool
+	}{
+		{"127.0.0.1:8888", true},
+		{"[::1]:8888", true},
+		{"localhost:8888", false},
+		{"example.com:8888", false},
+		{"127.0.0.1", false}, // no port
+		{"127.0.0.1:http", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		_, err := parseAddr(c.addr)
+		if c.ok && err != nil {
+			t.Errorf("parseAddr(%q) rejected a literal address: %v", c.addr, err)
+		}
+		if !c.ok && err == nil {
+			t.Errorf("parseAddr(%q) accepted something a relay would have to resolve", c.addr)
+		}
+	}
+}
+
+func TestNewSourceRejectsHostnameChain(t *testing.T) {
+	if _, err := NewSource([]string{"localhost:8888"}, testKey(t), 0, nil, false); err == nil {
+		t.Error("NewSource accepted an unresolved chain")
 	}
 }
