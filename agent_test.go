@@ -10,7 +10,7 @@ import (
 // its address. The agent is closed when the test ends.
 func startAgent(t *testing.T, key []byte, dropRate float64) string {
 	t.Helper()
-	a, err := NewAgent("127.0.0.1:0", key, dropRate, false)
+	a, err := NewAgent("127.0.0.1:0", key, dropRate, false, 2*time.Second)
 	if err != nil {
 		t.Fatalf("NewAgent: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestAgentDropInjection(t *testing.T) {
 // Stamps come from a monotonic clock, so they must be immune to wall-clock
 // steps and always advance.
 func TestAgentStampsAreMonotonic(t *testing.T) {
-	a, err := NewAgent("127.0.0.1:0", testKey(t), 0, false)
+	a, err := NewAgent("127.0.0.1:0", testKey(t), 0, false, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestAgentRefusesHostnames(t *testing.T) {
 }
 
 func TestNewSourceRejectsHostnameChain(t *testing.T) {
-	if _, err := NewSource([]string{"localhost:8888"}, testKey(t), 0, nil, false); err == nil {
+	if _, err := NewSource([]string{"localhost:8888"}, testKey(t), 0, nil, false, ""); err == nil {
 		t.Error("NewSource accepted an unresolved chain")
 	}
 }

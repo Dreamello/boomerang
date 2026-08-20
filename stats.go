@@ -116,7 +116,11 @@ func (st *Stats) Add(res *Result) {
 			s = &series{}
 			st.legs[key] = s
 			st.order = append(st.order, key)
-			st.ends[key] = [2]string{shortAddr(l.From), shortAddr(l.To)}
+			label := shortAddr(l.To)
+			if l.ICMP {
+				label += " (icmp)"
+			}
+			st.ends[key] = [2]string{shortAddr(l.From), label}
 		}
 		s.add(l.RTT)
 	}
@@ -153,7 +157,11 @@ func ProbeLine(res *Result, perHold bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "seq=%d", res.Seq)
 	for i, l := range res.Legs {
-		fmt.Fprintf(&b, " leg%d=%.2fms", i, msOf(l.RTT))
+		if l.ICMP {
+			fmt.Fprintf(&b, " leg%d(icmp)=%.2fms", i, msOf(l.RTT))
+		} else {
+			fmt.Fprintf(&b, " leg%d=%.2fms", i, msOf(l.RTT))
+		}
 	}
 	if perHold {
 		for i, h := range res.Holds {

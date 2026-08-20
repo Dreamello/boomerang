@@ -39,7 +39,7 @@ func runChain(t *testing.T, hops, count int, dropRate float64) (*Stats, string, 
 		chain[i] = startAgent(t, key, dropRate)
 	}
 	out := &syncBuf{}
-	src, err := NewSource(chain, key, 500*time.Millisecond, out, false)
+	src, err := NewSource(chain, key, 500*time.Millisecond, out, false, "")
 	if err != nil {
 		t.Fatalf("NewSource: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestIntegrationSurvivesPartialLoss(t *testing.T) {
 	dest := startAgent(t, key, 0)
 	lossy := startAgent(t, key, 0.5) // relay drops half
 	out := &syncBuf{}
-	src, err := NewSource([]string{lossy, dest}, key, 300*time.Millisecond, out, false)
+	src, err := NewSource([]string{lossy, dest}, key, 300*time.Millisecond, out, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestIntegrationStopSignal(t *testing.T) {
 	dest := startAgent(t, key, 0)
 	relay := startAgent(t, key, 0)
 	out := &syncBuf{}
-	src, err := NewSource([]string{relay, dest}, key, time.Second, out, false)
+	src, err := NewSource([]string{relay, dest}, key, time.Second, out, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestIntegrationSourceIgnoresForgedReply(t *testing.T) {
 	dest := startAgent(t, key, 0)
 
 	out := &syncBuf{}
-	src, err := NewSource([]string{dest}, other, 200*time.Millisecond, out, false)
+	src, err := NewSource([]string{dest}, other, 200*time.Millisecond, out, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -32,13 +32,18 @@ type Agent struct {
 	dropRate float64
 	verbose  bool
 
+	// ICMP last-hop termination. The socket is opened lazily on the first
+	// probe that needs it; a box that never terminates pays nothing.
+	icmp        icmpConn
+	icmpTimeout time.Duration
+
 	// Counters, for the health line only.
 	served  uint64
 	dropped uint64
 }
 
 // NewAgent binds the UDP socket.
-func NewAgent(addr string, key []byte, dropRate float64, verbose bool) (*Agent, error) {
+func NewAgent(addr string, key []byte, dropRate float64, verbose bool, icmpTimeout time.Duration) (*Agent, error) {
 	ua, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return nil, err
@@ -48,11 +53,12 @@ func NewAgent(addr string, key []byte, dropRate float64, verbose bool) (*Agent, 
 		return nil, err
 	}
 	return &Agent{
-		conn:     conn,
-		key:      key,
-		start:    time.Now(),
-		dropRate: dropRate,
-		verbose:  verbose,
+		conn:        conn,
+		key:         key,
+		start:       time.Now(),
+		dropRate:    dropRate,
+		verbose:     verbose,
+		icmpTimeout: icmpTimeout,
 	}, nil
 }
 
@@ -122,6 +128,14 @@ func (a *Agent) forwardOrTurn(p *Packet, src *net.UDPAddr, arrived int64) {
 	p.AppendReply(src.String())
 
 	if p.IsLast() {
+		// ICMP termination: this agent is the last in the chain and the probe
+		// has an ICMP target. Spawn the ping in its own goroutine so the main
+		// event loop isn't blocked by ICMP RTT.
+		if p.ICMPDest != "" {
+			go a.terminate(p, hop)
+			return
+		}
+
 		// Destination: turn it around, stamping TOut as late as possible so the
 		// turnaround reflects the real dwell time.
 		p.Phase = PhaseBack

@@ -32,6 +32,7 @@ type Leg struct {
 	From string // "src" or an address
 	To   string
 	RTT  int64 // ns, round trip across this leg only
+	ICMP bool  // true when this leg was measured via ICMP echo, not UDP
 }
 
 // Hold is time a node spent holding the packet: inbound plus outbound
@@ -70,6 +71,11 @@ func DeriveLegs(p *Packet, e2e int64) (*Result, error) {
 	res := &Result{Seq: p.Seq, E2E: e2e}
 	last := len(p.Chain) - 1
 
+	// With ICMPDest, the last chain entry is a terminator (stamps all four
+	// fields like a relay). Without it, the last is a destination (TIn/TOut
+	// only).
+	isTerminator := p.ICMPDest != ""
+
 	// Every hop must have stamped, or the packet did not travel the chain.
 	for n := 0; n <= last; n++ {
 		s, ok := p.Stamp(n)
@@ -81,6 +87,10 @@ func DeriveLegs(p *Packet, e2e int64) (*Result, error) {
 		}
 		if n != last && (s.TFwd == 0 || s.TRcv == 0) {
 			return nil, fmt.Errorf("relay %d (%s) has an incomplete stamp", n, p.Chain[n])
+		}
+		// The terminator also has TFwd/TRcv.
+		if n == last && isTerminator && (s.TFwd == 0 || s.TRcv == 0) {
+			return nil, fmt.Errorf("terminator %d (%s) has an incomplete stamp", n, p.Chain[n])
 		}
 	}
 
@@ -101,16 +111,29 @@ func DeriveLegs(p *Packet, e2e int64) (*Result, error) {
 		}
 		res.Legs = append(res.Legs, Leg{From: from, To: p.Chain[n], RTT: leg})
 
-		if n == last {
+		if n == last && !isTerminator {
 			// Destination: its full window is the turnaround.
 			res.Holds = append(res.Holds, Hold{At: p.Chain[n], Cost: full})
 			break
 		}
+
 		wire := s.TRcv - s.TFwd
 		if wire < 0 {
 			return nil, fmt.Errorf("relay %d (%s): rcv before fwd", n, p.Chain[n])
 		}
 		res.Holds = append(res.Holds, Hold{At: p.Chain[n], Cost: full - wire})
+
+		if n == last && isTerminator {
+			// Terminator: the wire window is the ICMP RTT — append as the
+			// final leg to the ICMP target.
+			icmpDest := p.ICMPDest
+			if p.ICMPReply != "" {
+				icmpDest = p.ICMPReply
+			}
+			res.Legs = append(res.Legs, Leg{From: p.Chain[n], To: icmpDest, RTT: wire, ICMP: true})
+			break
+		}
+
 		upstream = wire
 		from = p.Chain[n]
 	}

@@ -23,6 +23,9 @@ type Source struct {
 	perHold bool
 	// local is the address the kernel chose for this route, used to label leg0.
 	local string
+	// icmpDest, when set, makes the last agent in chain terminate via ICMP to
+	// this address instead of turning around.
+	icmpDest string
 
 	mu       sync.Mutex
 	inFlight map[int]time.Time // seq -> send time, on this process's clock
@@ -30,7 +33,7 @@ type Source struct {
 }
 
 // NewSource dials the first hop and prepares a run.
-func NewSource(chain []string, key []byte, timeout time.Duration, out io.Writer, perHold bool) (*Source, error) {
+func NewSource(chain []string, key []byte, timeout time.Duration, out io.Writer, perHold bool, icmpDest string) (*Source, error) {
 	if len(chain) == 0 {
 		return nil, errors.New("need at least one target")
 	}
@@ -64,6 +67,7 @@ func NewSource(chain []string, key []byte, timeout time.Duration, out io.Writer,
 		out:      out,
 		perHold:  perHold,
 		local:    local,
+		icmpDest: icmpDest,
 		inFlight: map[int]time.Time{},
 		stats:    NewStats(),
 	}, nil
@@ -80,11 +84,12 @@ func (s *Source) Local() string { return s.local }
 // send transmits one probe.
 func (s *Source) send(seq int) error {
 	p := &Packet{
-		V:     ProtoVersion,
-		Seq:   seq,
-		Chain: s.chain,
-		Phase: PhaseOut,
-		Hop:   0,
+		V:        ProtoVersion,
+		Seq:      seq,
+		Chain:    s.chain,
+		Phase:    PhaseOut,
+		Hop:      0,
+		ICMPDest: s.icmpDest,
 	}
 	buf, err := Encode(p, s.key)
 	if err != nil {

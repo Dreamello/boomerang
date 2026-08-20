@@ -24,7 +24,8 @@ import (
 
 const (
 	// ProtoVersion is bumped only on an incompatible wire change.
-	ProtoVersion = 1
+	// v2 adds ICMPDest (ICMP last-hop termination).
+	ProtoVersion = 2
 
 	// TagLen is the number of HMAC-SHA-256 bytes kept. 16 bytes (128 bits) is
 	// far beyond what an online forgery attempt against a UDP probe needs.
@@ -73,11 +74,24 @@ type Stamp struct {
 type Packet struct {
 	V      int      `json:"v"`
 	Seq    int      `json:"seq"`
-	Chain  []string `json:"chain"` // ordered hops; last entry is the destination
+	Chain  []string `json:"chain"` // ordered hops; last entry is the destination (or last relay if ICMPDest set)
 	Phase  Phase    `json:"phase"`
 	Hop    int      `json:"hop"`   // index into Chain of the node handling this packet
 	Reply  []string `json:"reply"` // observed previous-hop addrs, appended per hop
 	Stamps []Stamp  `json:"stamps"`
+
+	// ICMPDest, when set, is a bare IP the last agent in Chain should reach
+	// via ICMP echo. The chain's last agent becomes a terminator: it pings
+	// this address and folds the ICMP RTT into the derivation as the final
+	// leg. The probe payload carries itself as the echo body, so the
+	// terminator is stateless — no pending table.
+	ICMPDest string `json:"icmp_dest,omitempty"`
+
+	// ICMPReply is the address that actually replied to the echo — set by the
+	// terminator for attribution. Usually equals ICMPDest, but an anycast
+	// target may reply from a sibling. Not in the Reply stack (ICMP targets
+	// can't receive UDP).
+	ICMPReply string `json:"icmp_reply,omitempty"`
 }
 
 // signed is the envelope actually written to the wire: a packet plus a MAC

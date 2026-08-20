@@ -65,6 +65,8 @@ func main() {
 		verbose   = flag.Bool("v", false, "log dropped/unauthenticated packets")
 		perHold   = flag.Bool("holds", false, "show hold time per node instead of one total")
 		asJSON    = flag.Bool("json", false, "print one JSON object at exit instead of the text summary")
+		icmpLast  = flag.Bool("icmp-last", false, "reach the final target via ICMP echo (no agent needed there)")
+		icmpWait  = flag.Duration("icmp-wait", time.Second, "ICMP echo reply timeout at the terminator")
 	)
 	flag.Usage = usage
 	flag.Parse()
@@ -92,7 +94,7 @@ func main() {
 	}
 
 	if *agentMode {
-		runAgent(*bind, *port, key, *dropRate, *verbose)
+		runAgent(*bind, *port, key, *dropRate, *verbose, *icmpWait)
 		return
 	}
 
@@ -101,7 +103,11 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
-	runSource(targets, *port, key, *interval, *count, *wait, *perHold, *asJSON)
+	if *icmpLast && len(targets) < 2 {
+		fmt.Fprintf(os.Stderr, "boomerang: --icmp-last requires at least one relay and an ICMP target\n")
+		os.Exit(2)
+	}
+	runSource(targets, *port, key, *interval, *count, *wait, *perHold, *asJSON, *icmpLast)
 }
 
 func usage() {
@@ -118,14 +124,15 @@ Options:
 	flag.PrintDefaults()
 }
 
-func runAgent(bind string, port int, key []byte, dropRate float64, verbose bool) {
+func runAgent(bind string, port int, key []byte, dropRate float64, verbose bool, icmpTimeout time.Duration) {
 	addr := net.JoinHostPort(bind, fmt.Sprint(port))
-	a, err := NewAgent(addr, key, dropRate, verbose)
+	a, err := NewAgent(addr, key, dropRate, verbose, icmpTimeout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "boomerang: %v\n", err)
 		os.Exit(1)
 	}
 	defer a.Close()
+	defer a.icmp.close()
 	fmt.Printf("boomerang agent listening on udp/%s\n", addr)
 
 	sig := make(chan os.Signal, 1)
@@ -141,13 +148,22 @@ func runAgent(bind string, port int, key []byte, dropRate float64, verbose bool)
 	}
 }
 
-func runSource(targets []string, port int, key []byte, interval time.Duration, count int, wait time.Duration, perHold, asJSON bool) {
+func runSource(targets []string, port int, key []byte, interval time.Duration, count int, wait time.Duration, perHold, asJSON bool, icmpLast bool) {
+	// When --icmp-last is set, the final target is an ICMP destination (bare
+	// IP, no agent needed), and only the preceding targets are UDP agents.
+	var icmpDest string
+	udpTargets := targets
+	if icmpLast {
+		icmpDest = targets[len(targets)-1]
+		udpTargets = targets[:len(targets)-1]
+	}
+
 	// Resolve every hop once, here, and put addresses on the wire: DNS stays
 	// outside the measured intervals, and the chain is pinned to the hosts
 	// resolved at startup even under GeoDNS or round-robin.
-	chain := make([]string, 0, len(targets))
-	labels := make([]string, 0, len(targets))
-	for _, t := range targets {
+	chain := make([]string, 0, len(udpTargets))
+	labels := make([]string, 0, len(udpTargets))
+	for _, t := range udpTargets {
 		addr, label, err := resolveHop(t, port)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "boomerang: %v\n", err)
@@ -157,13 +173,32 @@ func runSource(targets []string, port int, key []byte, interval time.Duration, c
 		labels = append(labels, label)
 	}
 
+	// Resolve the ICMP dest (if any) for the header line.
+	var icmpLabel string
+	if icmpLast {
+		ip := net.ParseIP(icmpDest)
+		if ip == nil {
+			// Try to resolve it.
+			addrs, err := net.LookupIP(icmpDest)
+			if err != nil || len(addrs) == 0 {
+				fmt.Fprintf(os.Stderr, "boomerang: resolve icmp target %q: %v\n", icmpDest, err)
+				os.Exit(1)
+			}
+			ip = addrs[0]
+			icmpLabel = fmt.Sprintf("%s (%s)", icmpDest, ip)
+			icmpDest = ip.String()
+		} else {
+			icmpLabel = icmpDest
+		}
+	}
+
 	// In JSON mode stdout carries the payload and nothing else, so per-probe
 	// lines go to stderr where a redirect to a file leaves them behind.
 	probeOut := io.Writer(os.Stdout)
 	if asJSON {
 		probeOut = os.Stderr
 	}
-	src, err := NewSource(chain, key, wait, probeOut, perHold)
+	src, err := NewSource(chain, key, wait, probeOut, perHold, icmpDest)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "boomerang: %v\n", err)
 		os.Exit(1)
@@ -171,11 +206,15 @@ func runSource(targets []string, port int, key []byte, interval time.Duration, c
 	defer src.Close()
 
 	// Show what each name resolved to, like ping's "PING host (ip)".
-	dest := labels[len(labels)-1]
-	if len(labels) == 1 {
-		fmt.Fprintf(probeOut, "BOOMERANG %s direct\n", dest)
+	if icmpLast {
+		fmt.Fprintf(probeOut, "BOOMERANG %s via %s (icmp-last)\n", icmpLabel, strings.Join(labels, ", "))
 	} else {
-		fmt.Fprintf(probeOut, "BOOMERANG %s via %s\n", dest, strings.Join(labels[:len(labels)-1], ", "))
+		dest := labels[len(labels)-1]
+		if len(labels) == 1 {
+			fmt.Fprintf(probeOut, "BOOMERANG %s direct\n", dest)
+		} else {
+			fmt.Fprintf(probeOut, "BOOMERANG %s via %s\n", dest, strings.Join(labels[:len(labels)-1], ", "))
+		}
 	}
 
 	stop := make(chan struct{})

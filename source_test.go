@@ -18,7 +18,7 @@ func TestInterruptDoesNotCountAsLoss(t *testing.T) {
 
 	out := &syncBuf{}
 	// Deadline far longer than the run, so nothing legitimately times out.
-	src, err := NewSource([]string{silent}, key, 30*time.Second, out, false)
+	src, err := NewSource([]string{silent}, key, 30*time.Second, out, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestCountedRunStillReportsLoss(t *testing.T) {
 	silent := startAgent(t, key, 1.0)
 
 	out := &syncBuf{}
-	src, err := NewSource([]string{silent}, key, 200*time.Millisecond, out, false)
+	src, err := NewSource([]string{silent}, key, 200*time.Millisecond, out, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestLeg0NamesTheLocalAddress(t *testing.T) {
 	dest := startAgent(t, key, 0)
 
 	out := &syncBuf{}
-	src, err := NewSource([]string{dest}, key, 2*time.Second, out, false)
+	src, err := NewSource([]string{dest}, key, 2*time.Second, out, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
