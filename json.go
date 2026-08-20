@@ -52,6 +52,10 @@ type jsonRun struct {
 	Resolved []string `json:"resolved"`
 	Source   string   `json:"source"`
 	Port     int      `json:"port"`
+	// SourcePort identifies which flow this run measured. Where a path assigns
+	// latency per 5-tuple, runs from different source ports measure different
+	// paths, so recording the port is what makes a stored run reproducible.
+	SourcePort int `json:"source_port"`
 
 	DurationMs float64 `json:"duration_ms"`
 	Sent       int     `json:"sent"`
@@ -103,7 +107,7 @@ func seriesJSON(s *series) jsonSeries {
 //
 // chain is the user-supplied hop list and resolved the addresses actually used,
 // both in path order; source is the local address leg 0 started from.
-func (st *Stats) JSON(chain, resolved []string, source string, port int) ([]byte, error) {
+func (st *Stats) JSON(chain, resolved []string, source string, port, sourcePort int) ([]byte, error) {
 	// resolved arrives as ip:port; the port is one run-level fact, so report it
 	// once rather than repeating it on every hop.
 	bare := make([]string, 0, len(resolved))
@@ -117,6 +121,7 @@ func (st *Stats) JSON(chain, resolved []string, source string, port int) ([]byte
 		Resolved:    bare,
 		Port:        port,
 		Source:      source,
+		SourcePort:  sourcePort,
 		DurationMs:  round2(float64(time.Since(st.start).Nanoseconds()) / 1e6),
 		Sent:        st.sent,
 		Returned:    st.recv,

@@ -67,9 +67,12 @@ func main() {
 		asJSON    = flag.Bool("json", false, "print one JSON object at exit instead of the text summary")
 		icmpLast  = flag.Bool("icmp-last", false, "reach the final target via ICMP echo (no agent needed there)")
 		icmpWait  = flag.Duration("icmp-wait", time.Second, "ICMP echo reply timeout at the terminator")
+		sport     = flag.Int("sport", 0, "pin the source UDP port (0 = kernel picks); makes runs comparable on per-flow paths")
 	)
 	flag.Usage = usage
-	flag.Parse()
+	// Permute so flags are accepted in any position, like ping/curl/ssh:
+	// `boomerang relay.example -c 5` works, not just `-c 5 relay.example`.
+	flag.CommandLine.Parse(permuteArgs(flag.CommandLine, os.Args[1:]))
 
 	key, err := LoadKey(*keyFile)
 	if err != nil {
@@ -107,7 +110,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "boomerang: --icmp-last requires at least one relay and an ICMP target\n")
 		os.Exit(2)
 	}
-	runSource(targets, *port, key, *interval, *count, *wait, *perHold, *asJSON, *icmpLast)
+	runSource(targets, *port, key, *interval, *count, *wait, *perHold, *asJSON, *icmpLast, *sport)
 }
 
 func usage() {
@@ -148,7 +151,7 @@ func runAgent(bind string, port int, key []byte, dropRate float64, verbose bool,
 	}
 }
 
-func runSource(targets []string, port int, key []byte, interval time.Duration, count int, wait time.Duration, perHold, asJSON bool, icmpLast bool) {
+func runSource(targets []string, port int, key []byte, interval time.Duration, count int, wait time.Duration, perHold, asJSON bool, icmpLast bool, sport int) {
 	// When --icmp-last is set, the final target is an ICMP destination (bare
 	// IP, no agent needed), and only the preceding targets are UDP agents.
 	var icmpDest string
@@ -198,7 +201,7 @@ func runSource(targets []string, port int, key []byte, interval time.Duration, c
 	if asJSON {
 		probeOut = os.Stderr
 	}
-	src, err := NewSource(chain, key, wait, probeOut, perHold, icmpDest)
+	src, err := NewSource(chain, key, wait, probeOut, perHold, icmpDest, sport)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "boomerang: %v\n", err)
 		os.Exit(1)
@@ -206,14 +209,18 @@ func runSource(targets []string, port int, key []byte, interval time.Duration, c
 	defer src.Close()
 
 	// Show what each name resolved to, like ping's "PING host (ip)".
+	// The source port is reported because on a per-flow path it identifies which
+	// path this run measured; --sport <that port> reproduces it.
 	if icmpLast {
-		fmt.Fprintf(probeOut, "BOOMERANG %s via %s (icmp-last)\n", icmpLabel, strings.Join(labels, ", "))
+		fmt.Fprintf(probeOut, "BOOMERANG %s via %s (icmp-last) sport=%d\n",
+			icmpLabel, strings.Join(labels, ", "), src.SourcePort())
 	} else {
 		dest := labels[len(labels)-1]
 		if len(labels) == 1 {
-			fmt.Fprintf(probeOut, "BOOMERANG %s direct\n", dest)
+			fmt.Fprintf(probeOut, "BOOMERANG %s direct sport=%d\n", dest, src.SourcePort())
 		} else {
-			fmt.Fprintf(probeOut, "BOOMERANG %s via %s\n", dest, strings.Join(labels[:len(labels)-1], ", "))
+			fmt.Fprintf(probeOut, "BOOMERANG %s via %s sport=%d\n",
+				dest, strings.Join(labels[:len(labels)-1], ", "), src.SourcePort())
 		}
 	}
 
@@ -227,7 +234,7 @@ func runSource(targets []string, port int, key []byte, interval time.Duration, c
 
 	src.Run(count, interval, stop)
 	if asJSON {
-		payload, err := src.Stats().JSON(targets, chain, src.Local(), port)
+		payload, err := src.Stats().JSON(targets, chain, src.Local(), port, src.SourcePort())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "boomerang: %v\n", err)
 			os.Exit(1)

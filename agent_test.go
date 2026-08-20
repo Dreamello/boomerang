@@ -232,7 +232,7 @@ func TestAgentRefusesHostnames(t *testing.T) {
 }
 
 func TestNewSourceRejectsHostnameChain(t *testing.T) {
-	if _, err := NewSource([]string{"localhost:8888"}, testKey(t), 0, nil, false, ""); err == nil {
+	if _, err := NewSource([]string{"localhost:8888"}, testKey(t), 0, nil, false, "", 0); err == nil {
 		t.Error("NewSource accepted an unresolved chain")
 	}
 }

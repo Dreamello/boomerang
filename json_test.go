@@ -47,7 +47,7 @@ func TestJSONShape(t *testing.T) {
 	out, err := st.JSON(
 		[]string{"relay.example", "target.example"},
 		[]string{"192.0.2.101:8888", "198.51.100.20:8888"},
-		"192.0.2.36", 8888)
+		"192.0.2.36", 8888, 40001)
 	if err != nil {
 		t.Fatalf("JSON: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestJSONShape(t *testing.T) {
 func TestJSONEverySeriesHasSampleCount(t *testing.T) {
 	st := sampleStats(t)
 	out, _ := st.JSON([]string{"a", "b"},
-		[]string{"192.0.2.101:8888", "198.51.100.20:8888"}, "192.0.2.36", 8888)
+		[]string{"192.0.2.101:8888", "198.51.100.20:8888"}, "192.0.2.36", 8888, 40001)
 	m := decode(t, out)
 
 	legs := m["legs"].([]any)
@@ -131,7 +131,7 @@ func TestJSONAgreesWithTextSummary(t *testing.T) {
 	st := sampleStats(t)
 	chain := []string{"192.0.2.101:8888", "198.51.100.20:8888"}
 
-	out, _ := st.JSON([]string{"a", "b"}, chain, "192.0.2.36", 8888)
+	out, _ := st.JSON([]string{"a", "b"}, chain, "192.0.2.36", 8888, 40001)
 	m := decode(t, out)
 	text := st.Summary(chain, true)
 
@@ -158,7 +158,7 @@ func TestJSONTotalLossStaysValid(t *testing.T) {
 		st.Sent()
 	}
 
-	out, err := st.JSON([]string{"a"}, []string{"192.0.2.4:8888"}, "192.0.2.36", 8888)
+	out, err := st.JSON([]string{"a"}, []string{"192.0.2.4:8888"}, "192.0.2.36", 8888, 40001)
 	if err != nil {
 		t.Fatalf("total loss produced no payload: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestJSONCountsLateAndCancelled(t *testing.T) {
 	st.Late()
 	st.Cancelled(1)
 
-	out, _ := st.JSON([]string{"a"}, []string{"192.0.2.4:8888"}, "192.0.2.36", 8888)
+	out, _ := st.JSON([]string{"a"}, []string{"192.0.2.4:8888"}, "192.0.2.36", 8888, 40001)
 	m := decode(t, out)
 	if m["late"].(float64) != 1 {
 		t.Errorf("late: got %v want 1", m["late"])
@@ -203,5 +203,39 @@ func TestRound2(t *testing.T) {
 		if got := round2(c.in); got != c.want {
 			t.Errorf("round2(%v): got %v want %v", c.in, got, c.want)
 		}
+	}
+}
+
+// The JSON payload must record which source port the run used. A stored
+// measurement without it cannot be reproduced on a path that assigns latency
+// per 5-tuple, which is the whole reason --sport exists.
+func TestJSONRecordsSourcePort(t *testing.T) {
+	st := NewStats()
+	st.Add(&Result{
+		Seq: 0, E2E: 26_000_000,
+		Legs:  []Leg{{From: "198.51.100.1", To: "192.0.2.8:8888", RTT: 25_900_000}},
+		Holds: []Hold{{At: "192.0.2.8:8888", Cost: 100_000}},
+	})
+	raw, err := st.JSON([]string{"192.0.2.8"}, []string{"192.0.2.8:8888"},
+		"198.51.100.1", DefaultPort, 43000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	// Spelled out in JSON: a machine consumer has no --sport flag for context,
+	// and the file's other keys are full words (duration_ms, loss_pct).
+	v, ok := got["source_port"]
+	if !ok {
+		t.Fatalf("source_port absent; a stored run cannot be reproduced:\n%s", raw)
+	}
+	if n, _ := v.(float64); int(n) != 43000 {
+		t.Errorf("source_port: got %v want 43000", v)
+	}
+	// The destination port is a different field and must not be confused with it.
+	if p, _ := got["port"].(float64); int(p) != DefaultPort {
+		t.Errorf("port (destination): got %v want %d", got["port"], DefaultPort)
 	}
 }

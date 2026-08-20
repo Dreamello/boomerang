@@ -18,7 +18,7 @@ func TestInterruptDoesNotCountAsLoss(t *testing.T) {
 
 	out := &syncBuf{}
 	// Deadline far longer than the run, so nothing legitimately times out.
-	src, err := NewSource([]string{silent}, key, 30*time.Second, out, false, "")
+	src, err := NewSource([]string{silent}, key, 30*time.Second, out, false, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestCountedRunStillReportsLoss(t *testing.T) {
 	silent := startAgent(t, key, 1.0)
 
 	out := &syncBuf{}
-	src, err := NewSource([]string{silent}, key, 200*time.Millisecond, out, false, "")
+	src, err := NewSource([]string{silent}, key, 200*time.Millisecond, out, false, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestLeg0NamesTheLocalAddress(t *testing.T) {
 	dest := startAgent(t, key, 0)
 
 	out := &syncBuf{}
-	src, err := NewSource([]string{dest}, key, 2*time.Second, out, false, "")
+	src, err := NewSource([]string{dest}, key, 2*time.Second, out, false, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,4 +114,58 @@ func TestLeg0NamesTheLocalAddress(t *testing.T) {
 	if !strings.Contains(st.Summary([]string{dest}, false), "127.0.0.1") {
 		t.Error("summary does not name the local address")
 	}
+}
+
+// --sport pins the source port so a run is reproducible where a path assigns
+// latency per 5-tuple. Without it every run draws a fresh ephemeral port and
+// may measure a different path, making runs incomparable.
+func TestSourcePortPinning(t *testing.T) {
+	key := testKey(t)
+	dest := "127.0.0.1:9"
+
+	t.Run("zero picks an ephemeral port", func(t *testing.T) {
+		src, err := NewSource([]string{dest}, key, time.Second, &syncBuf{}, false, "", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer src.Close()
+		if p := src.SourcePort(); p == 0 {
+			t.Error("kernel-assigned port reported as 0")
+		}
+	})
+
+	t.Run("non-zero binds exactly that port", func(t *testing.T) {
+		const want = 24601
+		src, err := NewSource([]string{dest}, key, time.Second, &syncBuf{}, false, "", want)
+		if err != nil {
+			t.Skipf("cannot bind %d in this environment: %v", want, err)
+		}
+		defer src.Close()
+		if got := src.SourcePort(); got != want {
+			t.Errorf("pinned port: got %d want %d", got, want)
+		}
+	})
+
+	// A port already in use must fail loudly rather than silently falling back
+	// to an ephemeral one -- a silent fallback would make a "pinned" run
+	// measure a different flow than the caller asked for.
+	t.Run("busy port is an error, not a silent fallback", func(t *testing.T) {
+		const port = 24602
+		first, err := NewSource([]string{dest}, key, time.Second, &syncBuf{}, false, "", port)
+		if err != nil {
+			t.Skipf("cannot bind %d: %v", port, err)
+		}
+		defer first.Close()
+
+		second, err := NewSource([]string{dest}, key, time.Second, &syncBuf{}, false, "", port)
+		if err == nil {
+			got := second.SourcePort()
+			second.Close()
+			t.Fatalf("second bind of %d succeeded on port %d; a pinned port must not "+
+				"silently fall back", port, got)
+		}
+		if !strings.Contains(err.Error(), "24602") {
+			t.Errorf("error should name the port that could not be bound: %v", err)
+		}
+	})
 }

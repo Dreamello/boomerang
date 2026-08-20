@@ -4,16 +4,34 @@
 # Hash-gated: a truncated scp installs silently and segfaults later, so nothing
 # is installed unless the remote hash matches the local one.
 #
-# Usage: deploy-host.sh <ssh-target> <binary> <key> [--proxy]
-#   --proxy routes SSH/scp through a local SOCKS5 on 127.0.0.1:11111, which is
-#   for hosts requiring a proxy connection.
+# Usage: deploy-host.sh <ssh-target> <binary> <key> [options...]
+#   --proxy            route SSH/scp through a local SOCKS5 on 127.0.0.1:11111,
+#                      for hosts requiring a proxy connection.
+#   --jump <spec>      SSH jump host(s), passed to -J. Comma-separate for a
+#                      multi-hop chain (e.g. relay.example,jump.example).
+#   --identity <path>  private key for the target, passed to -i.
+#
+# Use --jump for hosts that require a jump host; the same install and key
+# permissions apply to direct and jumped connections.
 set -euo pipefail
 
-TARGET="$1"; BIN="$2"; KEY="$3"; PROXY="${4:-}"
+TARGET="$1"; BIN="$2"; KEY="$3"; shift 3
 SSH_OPTS=(-o ConnectTimeout=25 -o BatchMode=yes)
-if [ "$PROXY" = "--proxy" ]; then
-  SSH_OPTS+=(-o "ProxyCommand=nc -X 5 -x 127.0.0.1:11111 %h %p")
-fi
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --proxy)
+      SSH_OPTS+=(-o "ProxyCommand=nc -X 5 -x 127.0.0.1:11111 %h %p"); shift ;;
+    --jump)
+      [ $# -ge 2 ] || { echo "--jump needs a value" >&2; exit 2; }
+      SSH_OPTS+=(-J "$2"); shift 2 ;;
+    --identity)
+      [ $# -ge 2 ] || { echo "--identity needs a value" >&2; exit 2; }
+      SSH_OPTS+=(-i "$2"); shift 2 ;;
+    *)
+      echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+done
 
 WANT_BIN=$(shasum -a 256 "$BIN" | awk '{print $1}')
 WANT_KEY=$(shasum -a 256 "$KEY" | awk '{print $1}')
@@ -29,7 +47,7 @@ push() { # local remote want
       echo "   ok   $(basename "$dst") hash matches (attempt $attempt)"
       return 0
     fi
-    echo "   retry $(basename "$dst") hash mismatch (got ${got:0:12:-none})"
+    echo "   retry $(basename "$dst") hash mismatch (got ${got:-none})"
     ssh "${SSH_OPTS[@]}" "$TARGET" "rm -f '$dst'" || true
   done
   echo "   FATAL could not transfer $(basename "$dst") intact" >&2

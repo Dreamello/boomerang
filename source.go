@@ -33,7 +33,12 @@ type Source struct {
 }
 
 // NewSource dials the first hop and prepares a run.
-func NewSource(chain []string, key []byte, timeout time.Duration, out io.Writer, perHold bool, icmpDest string) (*Source, error) {
+//
+// sport pins the source UDP port when non-zero; 0 lets the kernel choose an
+// ephemeral one. Pinning makes a run repeatable on a path that assigns latency
+// per flow (5-tuple), so two runs can be compared rather than each drawing a
+// different path.
+func NewSource(chain []string, key []byte, timeout time.Duration, out io.Writer, perHold bool, icmpDest string, sport int) (*Source, error) {
 	if len(chain) == 0 {
 		return nil, errors.New("need at least one target")
 	}
@@ -43,8 +48,15 @@ func NewSource(chain []string, key []byte, timeout time.Duration, out io.Writer,
 	if err != nil {
 		return nil, fmt.Errorf("first hop %q must be a literal address: %w", chain[0], err)
 	}
-	conn, err := net.ListenUDP("udp", nil)
+	var laddr *net.UDPAddr
+	if sport != 0 {
+		laddr = &net.UDPAddr{Port: sport}
+	}
+	conn, err := net.ListenUDP("udp", laddr)
 	if err != nil {
+		if sport != 0 {
+			return nil, fmt.Errorf("bind source port %d: %w", sport, err)
+		}
 		return nil, err
 	}
 	// Label leg0 with the local address the kernel picks for this route. An
@@ -80,6 +92,11 @@ func (s *Source) Stats() *Stats { return s.stats }
 // Local reports the address the kernel chose for this route, which is what leg 0
 // starts from.
 func (s *Source) Local() string { return s.local }
+
+// SourcePort reports the UDP port probes actually left from. On a path that
+// assigns latency per flow, this identifies WHICH flow a run measured, so a
+// saved run is reproducible with --sport.
+func (s *Source) SourcePort() int { return s.conn.LocalAddr().(*net.UDPAddr).Port }
 
 // send transmits one probe.
 func (s *Source) send(seq int) error {
