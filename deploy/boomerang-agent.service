@@ -6,10 +6,16 @@ Wants=network-online.target
 [Service]
 Type=simple
 # systemd reads the key as root and re-exposes it under $CREDENTIALS_DIRECTORY
-# (%d) owned by this service's user, mode 0400. That is what lets the agent run
+# owned by this service's user, mode 0400. That is what lets the agent run
 # unprivileged while the key stays root-owned.
+#
+# ${CREDENTIALS_DIRECTORY} rather than the %d specifier: %d arrived in systemd
+# 250, so a unit using it is REJECTED AT PARSE TIME on Debian 11 (systemd 247)
+# with "Failed to resolve unit specifiers in %d/key: Invalid slot" -- and a
+# drop-in cannot rescue it, because the base file fails to parse first. The
+# environment variable is set by 247 and by everything newer.
 LoadCredential=key:/etc/boomerang.key
-ExecStart=/usr/local/bin/boomerang --agent --port 8888 --key-file %d/key
+ExecStart=/usr/local/bin/boomerang --agent --port 8888 --key-file ${CREDENTIALS_DIRECTORY}/key
 Restart=always
 RestartSec=2
 
