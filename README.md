@@ -1,165 +1,137 @@
 # Boomerang
 
-Measures end-to-end **and per-leg** round-trip time through a chain of relays,
-from a single probe.
+Measure end-to-end and per-leg round-trip latency through a chain of UDP agents,
+from a single probe. Each node uses its own monotonic clock; no clock synchronization
+is required.
 
-`ping` tells you a path is slow. Running it on each hop separately measures
-different paths at different moments. Boomerang sends one probe that collects
-timestamps out and back, so every leg comes from the same round trip.
-
-```
-$ boomerang relay.example target.example
-BOOMERANG target.example (198.51.100.20) via relay.example (192.0.2.101)
-seq=0 leg0=89.20ms leg1=32.06ms hold=0.14ms total=121.41ms
-seq=1 leg0=90.28ms leg1=32.00ms hold=0.12ms total=122.40ms
-^C
---- boomerang statistics (via 1 relay) ---
-6 probes sent, 6 returned, 0.0% loss, time 1.702s
-                                       min     avg     max  mdev  n
-leg0  192.0.2.36   -> 192.0.2.101     89.20   89.98   90.93  0.48  6
-leg1  192.0.2.101 -> 198.51.100.20   32.00   32.07   32.11  0.03  6
-hold                                  0.12    0.14    0.17  0.01  6
-total                               121.41  122.19  123.18  0.48  6
+```text
+source → relay → destination
+       ←       ←
 ```
 
-- **legN** — wire time for one hop pair. `leg0` starts at the local address the
-  kernel selected for the route.
-- **hold** — time inside the boxes: a relay's inbound plus outbound processing,
-  and the destination's turnaround. `--holds` splits it per node.
-- **total** — the whole round trip, measured on the source's clock. Legs plus
-  holds reconstruct it exactly.
-- **mdev** — mean absolute deviation, iputils `ping`'s definition, so the figures
-  compare directly with a plain ping run.
+## Install
 
-Read the **legs** to judge the path, **total** for what real traffic sees, and
-**hold** against the legs to tell a loaded box from a slow network.
+Go 1.25+, Linux or macOS.
+
+```bash
+git clone https://github.com/Dreamello/boomerang.git
+cd boomerang
+go install .
+```
+
+Add your Go binary directory to `PATH` (`~/go/bin` by default).
+
+## Setup
+
+Generate a shared key:
+
+```bash
+mkdir -p ~/.config/boomerang
+(umask 077; set -C; openssl rand -hex 32 > ~/.config/boomerang/key)
+```
+
+Use the same key on the source and every agent. Start an agent on each relay
+and destination, with UDP 8888 allowed through its firewall:
+
+```bash
+boomerang --agent
+```
+
+The default key path is `~/.config/boomerang/key`, falling back to
+`/etc/boomerang.key` on Linux. Override it with `--key-file PATH`.
 
 ## Usage
 
-```
-boomerang [options] HOP [HOP ...]   measure; the last HOP is the destination
-boomerang --agent [options]         run the relay/destination daemon
-```
-
-Any number of relays works. With none, boomerang is a plain UDP ping.
-
 ```bash
-boomerang 192.0.2.101 198.51.100.20        # via one relay, 1/sec until Ctrl-C
-boomerang -c 20 192.0.2.101 198.51.100.20  # exactly 20 probes
-boomerang a.example b.example c.example    # two relays
+boomerang 10.0.0.20                          # direct UDP probe
+boomerang 10.0.0.10 10.0.0.20 -c 20          # via a relay
+boomerang 10.0.0.10 10.0.0.20 10.0.0.30      # via two relays
+boomerang relay.example target.example       # hostnames also work
+boomerang 10.0.0.10:9000 10.0.0.20           # per-hop port
+boomerang --sport 30000 10.0.0.10 10.0.0.20  # pin source port
+boomerang --json -c 20 10.0.0.10 10.0.0.20 > run.json
 ```
 
-| flag | meaning |
+Replace the example IPs and hostnames with your hosts. List hops in traversal
+order; flags can appear before, between, or after them. Run `boomerang --help`
+for all options.
+
+| Option | Meaning |
 |---|---|
-| `-c N` | stop after N probes (default: until interrupted) |
-| `-i 1s` | interval between probes |
-| `-W 2s` | per-probe reply timeout |
-| `--holds` | hold time per node instead of one total |
-| `--port 8888` | UDP port |
-| `--key-file PATH` | pre-shared key (default `/etc/boomerang.key` on Linux, `~/.config/boomerang/key` elsewhere) |
-| `--json` | print one JSON object at exit; probe lines go to stderr |
-| `-v` | log dropped/unauthenticated packets |
+| `-c N` | Stop after N probes; default runs until interrupted |
+| `-i 1s` | Probe interval |
+| `-W 2s` | Reply timeout |
+| `--holds` | Show hold time per agent |
+| `--port N` | Default hop port, or agent listening port; default 8888 |
+| `--sport N` | Source UDP port; default is OS-assigned |
+| `--json` | JSON summary on stdout; probe lines on stderr |
 
-Exit status is 0 when at least one probe returned, 1 when none did.
+`--sport` controls only the first leg. Each agent forwards and replies from its
+own listening port. A `host:port` argument requires an agent listening there.
 
-Times print to 0.01 ms, matching a measurement floor set by host scheduling
-jitter of roughly half a millisecond. Timed-out probes count as loss; a reply
-arriving after its deadline is reported as late and excluded. Interrupting drops
-the in-flight probe from the totals, so Ctrl-C leaves the loss figure alone.
+### ICMP destination
 
-## How it works
-
-Every node measures intervals on its **own** monotonic clock. A leg is the
-difference between two adjacent intervals, so each node's clock offset appears
-twice inside one subtraction and cancels. No clock synchronisation is required,
-and because the cancellation is local to each pair it holds at any depth.
-
-```
-I0    = t3 - t0            round trip, source clock
-W(k)  = t_out - t_in       full window at hop k, hop k's clock
-W'(k) = t_rcv - t_fwd      wire-only window at hop k, hop k's clock
-
-leg 0   = I0     - W(0)        source <-> first hop
-leg k   = W'(k-1) - W(k)       hop k-1 <-> hop k
-hold k  = W(k)   - W'(k)       time hop k held the packet
-```
-
-Each relay takes four timestamps: arrival and send outbound, arrival and send on
-the return. The inner pair excludes the relay's own processing, so legs carry
-wire time and holds are reported on their own. The destination turns the packet
-around, so its full window is its hold.
-
-`sum(legs) + sum(holds) = total`, asserted by the test suite at one, two, and
-three hops.
-
-**Relays are stateless.** The route and the timestamps travel inside the packet,
-so a relay holds no configuration and nothing per probe: it reads its role off
-the packet — more hops after me means forward, last hop means turn around. Every
-node runs the identical binary with identical flags, so adding a hop means
-starting an agent there and naming it on the source's command line. Each hop also
-appends the address it received the packet from, which unwinds the return path
-and carries a NAT'd source's observable address, visible only to its first hop.
-
-**Names resolve once**, at the source, which puts addresses on the wire the way
-`ping` resolves at startup and prints `PING host (ip)`. DNS therefore stays
-outside the measured intervals, and the chain is pinned even under GeoDNS.
-
-## Authentication
-
-Every packet carries a truncated HMAC-SHA-256 tag; packets that fail
-verification are dropped silently.
-
-A `ping` responder replies only to the packet's own source address, so forging
-one gains an attacker nothing. A boomerang agent sends to addresses named
-*inside* the packet, and the MAC is what binds that routing to a holder of the
-shared key. It also stops a forged reply injecting fabricated measurements.
-
-The key is 32 bytes hex, read from a file — keeping it out of argv, the
-environment, `ps`, and shell history. The file must be unreadable to other users.
+The last agent can ping a target that does not run Boomerang:
 
 ```bash
-openssl rand -hex 32 > /etc/boomerang.key && chmod 600 /etc/boomerang.key
+boomerang --icmp-last 10.0.0.10 10.0.0.20 -c 10
 ```
 
-The same key goes on every node, including the source.
+Use an IPv4 target. On Linux, the last agent's group must be allowed by
+`net.ipv4.ping_group_range`. Restart the agent after changing that setting.
+`--icmp-wait` sets the agent's ICMP reply timeout (default 1s).
 
-## Deploying an agent
+## Output
+
+```text
+$ boomerang -c 3 -i 0.1s 10.0.0.10 10.0.0.20
+BOOMERANG 10.0.0.20 via 10.0.0.10 sport=56087
+seq=0 leg0=0.27ms leg1=0.23ms hold=0.26ms total=0.76ms
+seq=1 leg0=0.38ms leg1=0.40ms hold=0.09ms total=0.87ms
+seq=2 leg0=0.19ms leg1=0.15ms hold=0.07ms total=0.40ms
+
+--- boomerang statistics (via 1 relay) ---
+3 probes sent, 3 returned, 0.0% loss, time 301ms
+                               min   avg   max  mdev  n
+leg0  10.0.0.1  -> 10.0.0.10  0.19  0.28  0.38  0.07  3
+leg1  10.0.0.10 -> 10.0.0.20  0.15  0.26  0.40  0.09  3
+hold                          0.07  0.14  0.26  0.08  3
+total                         0.40  0.68  0.87  0.18  3
+```
+
+- **legN** — round-trip interval for a hop pair; `leg0` starts at the source.
+- **hold** — agent processing time outside its downstream wait.
+- **total** — end-to-end RTT; legs plus holds add up to it.
+- **mdev** — mean absolute deviation, not iputils ping's standard deviation.
+- **n** — samples in the summary series.
+
+Times are in milliseconds. Scheduling and socket overhead affect measurements;
+concurrent ICMP probes can also include local queueing. Lost probes cannot
+identify which leg dropped them.
+
+## Linux service
+
+Requires systemd 247+. Build for the target architecture (`arm64` for ARM hosts):
 
 ```bash
-GOOS=linux GOARCH=amd64 go build -trimpath -o boomerang .
-bash deploy/deploy-host.sh root@relay.example ./boomerang /path/to/fleet.key
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o boomerang-linux .
+bash deploy/deploy-host.sh operator@relay.example ./boomerang-linux ~/.config/boomerang/key
 ```
 
-The script compares the remote SHA-256 against the local one and installs only on
-a match — a 3.9 MB push over a lossy long-haul link truncated at 2,088,960 bytes
-during development, and a partial binary installs quietly and then segfaults.
-
-The systemd unit runs the agent unprivileged with `DynamicUser=yes` and passes
-the key via `LoadCredential=`, so the key stays root-owned. Port 8888 is
-unprivileged, so the agent binds with no capabilities.
-
-## Limits
-
-- **A lost probe cannot be attributed to a leg** — its timestamps went with it.
-- **Each leg is a round trip**, so an asymmetric path reads as one figure.
-- **The source's scheduling jitter lands in leg 0.** From a laptop on WiFi, leg 0
-  showed mdev 10.63 ms where a wired host showed 0.36 ms on the same relay.
-- **UDP and ICMP can measure the same path differently.** Cross-checked against
-  `ping`, boomerang agreed to 0.08 ms on one leg and read 2.88 ms faster on
-  another whose far end was a cloud VM — with larger packets, so not a size
-  effect. Treat a boomerang figure and a historical ping figure as different
-  measurements.
-- **A firewall scoped to the relay blocks direct probes**, reporting 100% loss
-  while ICMP still answers.
+The SSH user needs root or passwordless sudo. The script installs and enables
+`boomerang-agent.service`. It also accepts `--jump`, `--identity`, and `--proxy`;
+see [the script](deploy/deploy-host.sh) for details.
 
 ## Development
 
 ```bash
 go test ./... -count=1 -race
+go vet ./...
 ```
 
-The suite pins the property the design rests on: per-node clock offsets of up to
-a full day, in both directions, leave every derived leg bit-identical to the
-synchronised baseline. A companion test keeps that fixture honest by confirming
-the offsets reach the stamps and that cross-clock arithmetic fails by exactly the
-injected skew.
+Boomerang is intended for trusted nodes. Packets are HMAC-authenticated, not
+encrypted or replay-protected.
+
+## License
+
+Licensed under the [MIT License](LICENSE).

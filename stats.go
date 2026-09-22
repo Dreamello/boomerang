@@ -49,8 +49,7 @@ func (s *series) avg() float64 {
 	return sum / float64(len(s.samples))
 }
 
-// mdev is mean absolute deviation from the mean -- the same definition iputils
-// ping reports, so the numbers are comparable with a plain ping run.
+// mdev is mean absolute deviation from the mean, in milliseconds.
 func (s *series) mdev() float64 {
 	if len(s.samples) == 0 {
 		return 0

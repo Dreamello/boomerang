@@ -83,8 +83,7 @@ type Packet struct {
 	// ICMPDest, when set, is a bare IP the last agent in Chain should reach
 	// via ICMP echo. The chain's last agent becomes a terminator: it pings
 	// this address and folds the ICMP RTT into the derivation as the final
-	// leg. The probe payload carries itself as the echo body, so the
-	// terminator is stateless — no pending table.
+	// leg. The terminator retains the probe while waiting for the echo reply.
 	ICMPDest string `json:"icmp_dest,omitempty"`
 
 	// ICMPReply is the address that actually replied to the echo — set by the

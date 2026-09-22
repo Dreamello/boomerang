@@ -32,10 +32,8 @@ const DefaultPort = 8888
 
 // defaultKeyFile picks the key a run should use when none was named.
 //
-// A user-owned copy under $HOME wins when it exists, so a human on a relay box
-// gets a working default: the system key is 0600 root:root because the agent
-// reads it through systemd's LoadCredential, and a normal login cannot open it.
-// Falling back to the system path keeps root and the unit working unchanged.
+// An existing user key under $HOME takes precedence. Otherwise Linux uses
+// the system key path and other platforms use the user configuration path.
 func defaultKeyFile() string {
 	if home, err := os.UserHomeDir(); err == nil {
 		user := filepath.Join(home, ".config", "boomerang", "key")
@@ -70,7 +68,7 @@ func main() {
 		sport     = flag.Int("sport", 0, "pin the source UDP port (0 = kernel picks); makes runs comparable on per-flow paths")
 	)
 	flag.Usage = usage
-	// Permute so flags are accepted in any position, like ping/curl/ssh:
+	// Permute so ordinary flags are accepted between hop arguments:
 	// `boomerang relay.example -c 5` works, not just `-c 5 relay.example`.
 	flag.CommandLine.Parse(permuteArgs(flag.CommandLine, os.Args[1:]))
 

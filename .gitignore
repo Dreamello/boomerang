@@ -1,10 +1,19 @@
 # Go
 boomerang
+/boomerang-linux
 *.test
 *.out
 
-# Never commit the pre-shared key
+# Local credentials and packet captures
 *.key
+*.pem
+.env
+.env.*
+*.pcap
+*.pcapng
+
+# Local tooling
+.hermes/
 
 # macOS
 .DS_Store

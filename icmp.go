@@ -15,7 +15,7 @@ package main
 // Uses "udp4" network in x/net/icmp, which opens a SOCK_DGRAM ICMP socket —
 // the unprivileged path that works when the process GID falls inside
 // net.ipv4.ping_group_range. Check this setting on each Linux host.
-// If the socket cannot be opened, the agent logs once and refuses to terminate.
+// Socket-open failures are cached and reported when verbose logging is enabled.
 
 import (
 	"log"
@@ -101,7 +101,7 @@ func (ic *icmpConn) sendRecv(dst net.Addr, id, seq uint16, payload []byte, timeo
 		return "", err
 	}
 
-	// Read replies until we match our id+seq or timeout.
+	// Read replies until the sequence matches or the deadline expires.
 	buf := make([]byte, 1500)
 	for {
 		n, from, err := conn.ReadFrom(buf)

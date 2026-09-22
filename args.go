@@ -4,8 +4,7 @@ package main
 //
 // Go's flag package stops parsing at the first non-flag argument, so
 // `boomerang relay.example -c 5` treats "-c" as a hostname and fails with a
-// confusing DNS error. GNU getopt permutes instead, and every tool users reach
-// for alongside this one (ping, curl, ssh) accepts flags in any position.
+// confusing DNS error. Reordering allows ordinary flags between hop arguments.
 //
 // permuteArgs reorders argv so flags come first, then hands the result to
 // flag.Parse(). It must know which flags take a separate value, or
@@ -25,7 +24,7 @@ import (
 //	-flag=value  / --flag=value    self-contained, one token
 //	-flag value  / --flag value    two tokens, when flag is not boolean
 //	-bool        / --bool          one token, when flag IS boolean
-//	--                             everything after it is an operand, verbatim
+//	--                             stops this scan; the delimiter is not retained
 //
 // An unknown flag is passed through as a single token so flag.Parse() reports
 // it with its own error message rather than this code guessing at arity.
@@ -36,8 +35,8 @@ func permuteArgs(fs *flag.FlagSet, args []string) []string {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 
-		// "--" ends flag processing: the rest are operands even if they look
-		// like flags. This is what lets a destination literally named "-x" work.
+		// Stop scanning at "--". The downstream parser may still interpret
+		// flag-like operands because this transformation drops the delimiter.
 		if a == "--" {
 			operands = append(operands, args[i+1:]...)
 			break
